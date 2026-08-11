@@ -1,114 +1,882 @@
-const state = { images: [], logos: [], selectedIndex: 0, selectedLogoId: null, position: "bottom-right", ratioFilter: "all" };
+const LOGO_STORAGE_KEY = "batch-photo-logo-library-v2";
+const GROUP_TOLERANCE = 0.008;
 
-const els = Object.fromEntries([
-  "imageInput", "logoInput", "previewCanvas", "emptyState", "thumbs", "fileCount", "statusText", "clearAll",
-  "downloadCurrent", "downloadZip", "logoLibrary", "logoName", "logoGroup", "exportScope", "ratioFilter",
-  "logoSize", "logoMargin", "logoOpacity", "brightness", "contrast", "saturation", "sharpen", "format", "quality",
-  "logoSizeValue", "logoMarginValue", "logoOpacityValue", "brightnessValue", "contrastValue", "saturationValue", "qualityValue",
-].map((id) => [id, document.querySelector(`#${id}`)]));
+const state = {
+  images: [],
+  groups: [],
+  logos: [],
+  activeGroupId: null,
+  activeImageId: null,
+  selectedLogoId: null,
+  selectedOverlayId: null,
+  drag: null,
+  exporting: false,
+};
+
+const elementIds = [
+  "imageInput", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
+  "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
+  "previewCanvas", "emptyState", "notice", "logoLibrary", "logoEditor",
+  "logoName", "logoGroup", "addLogoToJob", "deleteLogo", "overlayCount", "overlayList",
+  "placementControls", "autoPlace", "logoSize", "logoSizeValue", "logoOpacity",
+  "logoOpacityValue", "removeOverlay", "brightness", "brightnessValue", "contrast",
+  "contrastValue", "saturation", "saturationValue", "resetAdjustments", "format", "maxEdge",
+  "quality", "qualityValue", "downloadCurrent", "downloadGroup", "exportProgress",
+  "exportProgressBar",
+];
+const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 els.positionButtons = [...document.querySelectorAll("[data-position]")];
-const ctx = els.previewCanvas.getContext("2d", { willReadFrequently: true });
+const previewCtx = els.previewCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
 
-els.imageInput.addEventListener("change", async (event) => {
-  const loaded = await Promise.all([...event.target.files].filter(isImage).map(loadImageFile));
-  state.images.push(...loaded.map((image) => ({ ...image, ratio: classifyRatio(image.img.naturalWidth, image.img.naturalHeight) })));
-  state.selectedIndex = 0;
-  refreshRatioFilter(); renderThumbs(); drawPreview();
-});
+initialize();
 
-els.logoInput.addEventListener("change", async (event) => {
-  const loaded = await Promise.all([...event.target.files].filter(isImage).map(loadImageFile));
-  loaded.forEach((item) => state.logos.push({ ...item, id: crypto.randomUUID(), name: stripExtension(item.file.name), group: "未分组" }));
-  if (!state.selectedLogoId && state.logos[0]) state.selectedLogoId = state.logos[0].id;
-  renderLogoLibrary(); drawPreview();
-  event.target.value = "";
-});
-
-[els.logoSize, els.logoMargin, els.logoOpacity, els.brightness, els.contrast, els.saturation, els.quality].forEach((control) => {
-  control.addEventListener("input", () => { updateValueLabels(); drawPreview(); });
-});
-els.sharpen.addEventListener("change", drawPreview);
-els.format.addEventListener("change", drawPreview);
-els.logoName.addEventListener("input", () => updateSelectedLogoMeta("name", els.logoName.value));
-els.logoGroup.addEventListener("input", () => updateSelectedLogoMeta("group", els.logoGroup.value));
-els.ratioFilter.addEventListener("change", () => { state.ratioFilter = els.ratioFilter.value; ensureSelectedImageVisible(); renderThumbs(); drawPreview(); });
-els.positionButtons.forEach((button) => button.addEventListener("click", () => { state.position = button.dataset.position; els.positionButtons.forEach((item) => item.classList.toggle("active", item === button)); drawPreview(); }));
-
-els.clearAll.addEventListener("click", () => {
-  [...state.images, ...state.logos].forEach((item) => URL.revokeObjectURL(item.url));
-  Object.assign(state, { images: [], logos: [], selectedIndex: 0, selectedLogoId: null, ratioFilter: "all" });
-  els.imageInput.value = ""; refreshRatioFilter(); renderLogoLibrary(); renderThumbs(); drawPreview();
-});
-els.downloadCurrent.addEventListener("click", async () => {
-  const image = getSelectedImage(); if (!image) return;
-  downloadBlob(await renderImageBlob(image), makeOutputName(image.file.name));
-});
-els.downloadZip.addEventListener("click", async () => {
-  const images = getExportImages(); if (!images.length) return;
-  els.downloadZip.disabled = true; els.downloadZip.textContent = `正在处理 0/${images.length}`;
-  const files = [];
-  for (let i = 0; i < images.length; i += 1) {
-    const image = images[i]; const blob = await renderImageBlob(image);
-    files.push({ name: makeOutputName(image.file.name), bytes: new Uint8Array(await blob.arrayBuffer()) });
-    els.downloadZip.textContent = `正在处理 ${i + 1}/${images.length}`;
-  }
-  downloadBlob(createZip(files), `batch-photo-${Date.now()}.zip`);
-  els.downloadZip.textContent = "导出并打包 ZIP"; updateStatus();
-});
-
-function isImage(file) { return file.type.startsWith("image/"); }
-function loadImageFile(file) { return new Promise((resolve, reject) => { const img = new Image(); const url = URL.createObjectURL(file); img.onload = () => resolve({ file, img, url }); img.onerror = reject; img.src = url; }); }
-function getSelectedImage() { return state.images[state.selectedIndex]; }
-function getSelectedLogo() { return state.logos.find((logo) => logo.id === state.selectedLogoId) || null; }
-function getVisibleImages() { return state.ratioFilter === "all" ? state.images : state.images.filter((image) => image.ratio === state.ratioFilter); }
-function getExportImages() { return els.exportScope.value === "all" ? state.images : getVisibleImages(); }
-function classifyRatio(width, height) { const ratio = width / height; if (Math.abs(ratio - 1) < 0.06) return "1:1 方图"; if (ratio > 1.55) return "横图"; if (ratio < 0.75) return "竖图"; return "常规图"; }
-function stripExtension(name) { return name.replace(/\.[^.]+$/, ""); }
-function updateValueLabels() { [[els.logoSize, els.logoSizeValue, "%"], [els.logoMargin, els.logoMarginValue, "%"], [els.logoOpacity, els.logoOpacityValue, "%"], [els.brightness, els.brightnessValue, ""], [els.contrast, els.contrastValue, ""], [els.saturation, els.saturationValue, ""], [els.quality, els.qualityValue, "%"]].forEach(([input, output, suffix]) => { output.textContent = `${input.value}${suffix}`; }); }
-
-function refreshRatioFilter() {
-  const current = state.ratioFilter; const groups = [...new Set(state.images.map((image) => image.ratio))];
-  els.ratioFilter.innerHTML = `<option value="all">全部 (${state.images.length})</option>${groups.map((group) => `<option value="${group}">${group} (${state.images.filter((image) => image.ratio === group).length})</option>`).join("")}`;
-  state.ratioFilter = groups.includes(current) ? current : "all"; els.ratioFilter.value = state.ratioFilter;
+function initialize() {
+  restoreLogoLibrary();
+  bindEvents();
+  renderAll();
 }
-function ensureSelectedImageVisible() { const image = getSelectedImage(); if (!image || (state.ratioFilter !== "all" && image.ratio !== state.ratioFilter)) { const visible = getVisibleImages()[0]; state.selectedIndex = state.images.indexOf(visible); } }
-function updateSelectedLogoMeta(key, value) { const logo = getSelectedLogo(); if (!logo) return; logo[key] = value.trim() || (key === "group" ? "未分组" : "未命名 Logo"); renderLogoLibrary(); }
+
+function bindEvents() {
+  els.imageInput.addEventListener("change", handleImageUpload);
+  els.logoInput.addEventListener("change", handleLogoUpload);
+  els.clearAll.addEventListener("click", clearTasks);
+  els.logoName.addEventListener("change", () => updateLogoMeta("name", els.logoName.value));
+  els.logoGroup.addEventListener("change", () => updateLogoMeta("group", els.logoGroup.value));
+  els.addLogoToJob.addEventListener("click", addSelectedLogoToJob);
+  els.deleteLogo.addEventListener("click", deleteSelectedLogo);
+  els.removeOverlay.addEventListener("click", removeSelectedOverlay);
+  els.autoPlace.addEventListener("click", autoPlaceSelectedOverlay);
+  els.positionButtons.forEach((button) => button.addEventListener("click", () => placeSelectedOverlay(button.dataset.position)));
+
+  [els.logoSize, els.logoOpacity].forEach((input) => input.addEventListener("input", updateOverlayFromControls));
+  [els.brightness, els.contrast, els.saturation].forEach((input) => input.addEventListener("input", updateGroupAdjustments));
+  els.resetAdjustments.addEventListener("click", resetGroupAdjustments);
+  els.quality.addEventListener("input", updateControlLabels);
+  els.downloadCurrent.addEventListener("click", downloadCurrentImage);
+  els.downloadGroup.addEventListener("click", downloadActiveGroup);
+
+  els.previewCanvas.addEventListener("pointerdown", startOverlayDrag);
+  els.previewCanvas.addEventListener("pointermove", moveOverlayDrag);
+  els.previewCanvas.addEventListener("pointerup", endOverlayDrag);
+  els.previewCanvas.addEventListener("pointercancel", endOverlayDrag);
+  window.addEventListener("resize", fitPreviewCanvas);
+}
+
+async function handleImageUpload(event) {
+  const files = [...event.target.files].filter(isImageFile);
+  if (!files.length) return;
+  showNotice(`正在读取 ${files.length} 张图片…`, true);
+  const results = await Promise.allSettled(files.map(loadImageFile));
+  const loaded = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  const failed = results.length - loaded.length;
+  loaded.forEach(addImageToRatioGroup);
+  if (!state.activeGroupId && state.groups[0]) activateGroup(state.groups[0].id);
+  renderAll();
+  showNotice(failed ? `已添加 ${loaded.length} 张，${failed} 张读取失败。` : `已自动分成 ${state.groups.length} 个比例任务。`, failed === 0);
+  event.target.value = "";
+}
+
+async function handleLogoUpload(event) {
+  const files = [...event.target.files].filter(isImageFile);
+  if (!files.length) return;
+  const results = await Promise.allSettled(files.map(loadLogoFile));
+  const loaded = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  state.logos.push(...loaded);
+  if (loaded[0]) state.selectedLogoId = loaded[0].id;
+  persistLogoLibrary();
+  renderLogoLibrary();
+  renderLogoEditor();
+  updateButtons();
+  event.target.value = "";
+}
+
+function addImageToRatioGroup(image) {
+  const ratio = image.width / image.height;
+  let group = state.groups.find((item) => Math.abs(item.ratio - ratio) <= GROUP_TOLERANCE);
+  if (!group) {
+    group = {
+      id: uid(),
+      ratio,
+      label: ratioLabel(ratio),
+      imageIds: [],
+      overlays: [],
+      adjustments: { brightness: 0, contrast: 0, saturation: 0 },
+    };
+    state.groups.push(group);
+    sortGroups();
+  }
+  image.groupId = group.id;
+  group.imageIds.push(image.id);
+  state.images.push(image);
+}
+
+function sortGroups() {
+  state.groups.sort((a, b) => b.ratio - a.ratio);
+}
+
+function activateGroup(groupId) {
+  state.activeGroupId = groupId;
+  const group = getActiveGroup();
+  state.activeImageId = group?.imageIds[0] || null;
+  state.selectedOverlayId = group?.overlays[0]?.id || null;
+  syncControlsFromGroup();
+  renderAll();
+}
+
+function activateImage(imageId) {
+  state.activeImageId = imageId;
+  renderThumbs();
+  renderPreview();
+  renderWorkspaceHeader();
+}
+
+function clearTasks() {
+  state.images.forEach((image) => URL.revokeObjectURL(image.url));
+  state.images = [];
+  state.groups = [];
+  state.activeGroupId = null;
+  state.activeImageId = null;
+  state.selectedOverlayId = null;
+  hideNotice();
+  renderAll();
+}
+
+function addSelectedLogoToJob() {
+  const group = getActiveGroup();
+  const logo = getSelectedLogo();
+  if (!group || !logo) return;
+  const overlay = { id: uid(), logoId: logo.id, x: 0.76, y: 0.80, width: 0.18, opacity: 1 };
+  group.overlays.push(overlay);
+  state.selectedOverlayId = overlay.id;
+  placeSelectedOverlay("bottom-right");
+  renderOverlayList();
+  syncOverlayControls();
+  renderPreview();
+  renderGroupList();
+  updateButtons();
+}
+
+function removeSelectedOverlay() {
+  const group = getActiveGroup();
+  if (!group) return;
+  group.overlays = group.overlays.filter((overlay) => overlay.id !== state.selectedOverlayId);
+  state.selectedOverlayId = group.overlays[0]?.id || null;
+  renderOverlayList();
+  syncOverlayControls();
+  renderPreview();
+  renderGroupList();
+  updateButtons();
+}
+
+function deleteSelectedLogo() {
+  const logo = getSelectedLogo();
+  if (!logo) return;
+  state.logos = state.logos.filter((item) => item.id !== logo.id);
+  state.groups.forEach((group) => { group.overlays = group.overlays.filter((overlay) => overlay.logoId !== logo.id); });
+  state.selectedLogoId = state.logos[0]?.id || null;
+  const activeGroup = getActiveGroup();
+  state.selectedOverlayId = activeGroup?.overlays[0]?.id || null;
+  persistLogoLibrary();
+  renderAll();
+}
+
+function updateLogoMeta(key, rawValue) {
+  const logo = getSelectedLogo();
+  if (!logo) return;
+  const fallback = key === "group" ? "未分组" : "未命名 Logo";
+  logo[key] = rawValue.trim() || fallback;
+  persistLogoLibrary();
+  renderLogoLibrary();
+  renderOverlayList();
+}
+
+function updateOverlayFromControls() {
+  const overlay = getSelectedOverlay();
+  if (!overlay) return;
+  overlay.width = Number(els.logoSize.value) / 100;
+  overlay.opacity = Number(els.logoOpacity.value) / 100;
+  clampOverlay(overlay);
+  updateControlLabels();
+  renderPreview();
+  renderOverlayList();
+}
+
+function updateGroupAdjustments() {
+  const group = getActiveGroup();
+  if (!group) return;
+  group.adjustments.brightness = Number(els.brightness.value);
+  group.adjustments.contrast = Number(els.contrast.value);
+  group.adjustments.saturation = Number(els.saturation.value);
+  updateControlLabels();
+  renderPreview();
+}
+
+function resetGroupAdjustments() {
+  const group = getActiveGroup();
+  if (!group) return;
+  group.adjustments = { brightness: 0, contrast: 0, saturation: 0 };
+  syncControlsFromGroup();
+  renderPreview();
+}
+
+function placeSelectedOverlay(position) {
+  const overlay = getSelectedOverlay();
+  const group = getActiveGroup();
+  const logo = getLogoById(overlay?.logoId);
+  if (!overlay || !group || !logo) return;
+  const margin = 0.035;
+  const height = overlayHeightNormalized(overlay, logo, group.ratio);
+  const positions = {
+    "top-left": [margin, margin],
+    "top-right": [1 - overlay.width - margin, margin],
+    center: [(1 - overlay.width) / 2, (1 - height) / 2],
+    "bottom-left": [margin, 1 - height - margin],
+    "bottom-right": [1 - overlay.width - margin, 1 - height - margin],
+  };
+  [overlay.x, overlay.y] = positions[position] || positions["bottom-right"];
+  clampOverlay(overlay);
+  renderPreview();
+}
+
+function autoPlaceSelectedOverlay() {
+  const overlay = getSelectedOverlay();
+  const image = getActiveImage();
+  const group = getActiveGroup();
+  const logo = getLogoById(overlay?.logoId);
+  if (!overlay || !image || !group || !logo) return;
+  drawBaseImage(image, group, els.previewCanvas, previewCtx);
+  const height = overlayHeightNormalized(overlay, logo, group.ratio);
+  const margin = 0.035;
+  const candidates = [
+    [margin, margin], [1 - overlay.width - margin, margin],
+    [margin, 1 - height - margin], [1 - overlay.width - margin, 1 - height - margin],
+    [(1 - overlay.width) / 2, margin], [(1 - overlay.width) / 2, 1 - height - margin],
+  ];
+  const logoLightness = getLogoLightness(logo);
+  let best = { point: candidates[0], score: -Infinity };
+  candidates.forEach((point) => {
+    const score = contrastScore(previewCtx, point[0], point[1], overlay.width, height, logoLightness);
+    if (score > best.score) best = { point, score };
+  });
+  [overlay.x, overlay.y] = best.point;
+  renderPreview();
+}
+
+function startOverlayDrag(event) {
+  const group = getActiveGroup();
+  if (!group) return;
+  const point = pointerToCanvas(event);
+  const hit = [...group.overlays].reverse().find((overlay) => pointInOverlay(point, overlay));
+  if (!hit) return;
+  state.selectedOverlayId = hit.id;
+  state.drag = { pointerId: event.pointerId, offsetX: point.x - hit.x * els.previewCanvas.width, offsetY: point.y - hit.y * els.previewCanvas.height };
+  els.previewCanvas.setPointerCapture(event.pointerId);
+  els.previewCanvas.classList.add("dragging");
+  renderOverlayList();
+  syncOverlayControls();
+  renderPreview();
+}
+
+function moveOverlayDrag(event) {
+  if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+  const overlay = getSelectedOverlay();
+  if (!overlay) return;
+  const point = pointerToCanvas(event);
+  overlay.x = (point.x - state.drag.offsetX) / els.previewCanvas.width;
+  overlay.y = (point.y - state.drag.offsetY) / els.previewCanvas.height;
+  clampOverlay(overlay);
+  renderPreview();
+}
+
+function endOverlayDrag(event) {
+  if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+  state.drag = null;
+  els.previewCanvas.classList.remove("dragging");
+  if (els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.releasePointerCapture(event.pointerId);
+}
+
+function pointInOverlay(point, overlay) {
+  const rect = overlayRect(overlay, els.previewCanvas.width, els.previewCanvas.height);
+  return point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height;
+}
+
+function pointerToCanvas(event) {
+  const rect = els.previewCanvas.getBoundingClientRect();
+  return { x: (event.clientX - rect.left) * els.previewCanvas.width / rect.width, y: (event.clientY - rect.top) * els.previewCanvas.height / rect.height };
+}
+
+function clampOverlay(overlay) {
+  const group = getActiveGroup();
+  const logo = getLogoById(overlay.logoId);
+  if (!group || !logo) return;
+  const height = overlayHeightNormalized(overlay, logo, group.ratio);
+  overlay.x = clamp(overlay.x, 0, Math.max(0, 1 - overlay.width));
+  overlay.y = clamp(overlay.y, 0, Math.max(0, 1 - height));
+}
+
+function renderAll() {
+  renderGroupList();
+  renderWorkspaceHeader();
+  renderThumbs();
+  renderLogoLibrary();
+  renderLogoEditor();
+  renderOverlayList();
+  syncControlsFromGroup();
+  renderPreview();
+  updateButtons();
+  updateGlobalStatus();
+}
+
+function renderGroupList() {
+  if (!state.groups.length) {
+    els.groupList.innerHTML = '<div class="sidebar-empty">添加图片后，这里会出现“任务 1、任务 2…”</div>';
+    return;
+  }
+  els.groupList.innerHTML = "";
+  state.groups.forEach((group, index) => {
+    const dimensions = group.imageIds.map((id) => getImageById(id)).filter(Boolean);
+    const samples = [...new Set(dimensions.map((image) => `${image.width}×${image.height}`))].slice(0, 2).join("、");
+    const button = document.createElement("button");
+    button.className = `group-card${group.id === state.activeGroupId ? " active" : ""}`;
+    button.innerHTML = `<div class="group-card-top"><strong>任务 ${index + 1}</strong><span>${group.imageIds.length} 张</span></div><div class="group-card-ratio">${escapeHtml(group.label)}</div><div class="group-card-bottom"><span>${escapeHtml(samples)}</span><span class="${group.overlays.length ? "group-ready" : ""}">${group.overlays.length ? `${group.overlays.length} 个 Logo` : "待设置"}</span></div>`;
+    button.addEventListener("click", () => activateGroup(group.id));
+    els.groupList.append(button);
+  });
+}
+
+function renderWorkspaceHeader() {
+  const group = getActiveGroup();
+  const image = getActiveImage();
+  const groupIndex = state.groups.findIndex((item) => item.id === group?.id);
+  els.activeGroupTitle.textContent = group ? `任务 ${groupIndex + 1} · ${group.label}` : "尚未选择比例任务";
+  els.activeImageName.textContent = image?.file.name || "暂无图片";
+  els.activeImageMeta.textContent = image ? `${image.width} × ${image.height} px` : "添加图片后可预览";
+  els.groupImageCount.textContent = group ? `${group.imageIds.length} 张` : "0 张";
+}
+
+function renderThumbs() {
+  const group = getActiveGroup();
+  els.thumbs.innerHTML = "";
+  if (!group) return;
+  group.imageIds.forEach((imageId) => {
+    const image = getImageById(imageId);
+    if (!image) return;
+    const button = document.createElement("button");
+    button.className = `thumb${image.id === state.activeImageId ? " active" : ""}`;
+    button.innerHTML = `<img src="${image.url}" alt=""><span>${escapeHtml(image.file.name)}</span>`;
+    button.addEventListener("click", () => activateImage(image.id));
+    els.thumbs.append(button);
+  });
+}
 
 function renderLogoLibrary() {
+  if (!state.logos.length) {
+    els.logoLibrary.innerHTML = '<p class="tool-empty">添加 Logo 后可视化选择，名称会自动保存。</p>';
+    return;
+  }
   els.logoLibrary.innerHTML = "";
-  if (!state.logos.length) { els.logoLibrary.innerHTML = '<p class="hint">添加透明 PNG 后，会保存在本次工作中。</p>'; els.logoName.value = ""; els.logoGroup.value = ""; return; }
-  state.logos.forEach((logo) => {
-    const button = document.createElement("button"); button.className = `logo-item${logo.id === state.selectedLogoId ? " active" : ""}`;
-    button.innerHTML = `<img src="${logo.url}" alt=""><span><strong>${escapeHtml(logo.name)}</strong><small>${escapeHtml(logo.group)}</small></span>`;
-    button.addEventListener("click", () => { state.selectedLogoId = logo.id; els.logoName.value = logo.name; els.logoGroup.value = logo.group; renderLogoLibrary(); drawPreview(); });
-    els.logoLibrary.append(button);
+  const groups = groupBy(state.logos, (logo) => logo.group || "未分组");
+  Object.entries(groups).forEach(([groupName, logos]) => {
+    const heading = document.createElement("div");
+    heading.className = "logo-group-title";
+    heading.textContent = groupName;
+    els.logoLibrary.append(heading);
+    logos.forEach((logo) => {
+      const button = document.createElement("button");
+      button.className = `logo-card${logo.id === state.selectedLogoId ? " active" : ""}`;
+      button.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span>`;
+      button.addEventListener("click", () => {
+        state.selectedLogoId = logo.id;
+        renderLogoLibrary();
+        renderLogoEditor();
+        updateButtons();
+      });
+      els.logoLibrary.append(button);
+    });
   });
-  const active = getSelectedLogo(); els.logoName.value = active?.name || ""; els.logoGroup.value = active?.group || "";
 }
-function renderThumbs() {
-  els.thumbs.innerHTML = "";
-  getVisibleImages().forEach((image) => {
-    const index = state.images.indexOf(image); const button = document.createElement("button"); button.className = `thumb${index === state.selectedIndex ? " active" : ""}`;
-    button.innerHTML = `<img src="${image.url}" alt=""><span>${escapeHtml(image.file.name)}</span><small>${image.ratio}</small>`;
-    button.addEventListener("click", () => { state.selectedIndex = index; renderThumbs(); drawPreview(); }); els.thumbs.append(button);
+
+function renderLogoEditor() {
+  const logo = getSelectedLogo();
+  els.logoEditor.hidden = !logo;
+  if (!logo) return;
+  els.logoName.value = logo.name;
+  els.logoGroup.value = logo.group;
+}
+
+function renderOverlayList() {
+  const group = getActiveGroup();
+  const overlays = group?.overlays || [];
+  els.overlayCount.textContent = `${overlays.length} 个`;
+  if (!overlays.length) {
+    els.overlayList.innerHTML = '<p class="tool-empty">从 Logo 库一键添加，可叠加多个 Logo。</p>';
+    return;
+  }
+  els.overlayList.innerHTML = "";
+  overlays.forEach((overlay) => {
+    const logo = getLogoById(overlay.logoId);
+    if (!logo) return;
+    const button = document.createElement("button");
+    button.className = `overlay-item${overlay.id === state.selectedOverlayId ? " active" : ""}`;
+    button.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span><small>${Math.round(overlay.width * 100)}%</small>`;
+    button.addEventListener("click", () => {
+      state.selectedOverlayId = overlay.id;
+      renderOverlayList();
+      syncOverlayControls();
+      renderPreview();
+    });
+    els.overlayList.append(button);
   });
 }
-function drawPreview() { updateStatus(); const image = getSelectedImage(); if (!image) { ctx.clearRect(0, 0, els.previewCanvas.width, els.previewCanvas.height); els.emptyState.classList.remove("hidden"); return; } els.emptyState.classList.add("hidden"); renderToCanvas(image, els.previewCanvas); }
-function renderToCanvas(image, canvas) { const scale = Math.min(1, 1400 / image.img.naturalWidth); canvas.width = Math.round(image.img.naturalWidth * scale); canvas.height = Math.round(image.img.naturalHeight * scale); const targetCtx = canvas.getContext("2d", { willReadFrequently: true }); targetCtx.clearRect(0, 0, canvas.width, canvas.height); targetCtx.drawImage(image.img, 0, 0, canvas.width, canvas.height); applyAdjustments(targetCtx, canvas.width, canvas.height); drawLogo(targetCtx, canvas.width, canvas.height); }
-function applyAdjustments(targetCtx, width, height) { const brightness = Number(els.brightness.value); const contrast = Number(els.contrast.value); const saturation = Number(els.saturation.value); const imageData = targetCtx.getImageData(0, 0, width, height); const data = imageData.data; const contrastFactor = (259 * (contrast + 255)) / (255 * (259 - contrast)); const saturationFactor = 1 + saturation / 100; for (let index = 0; index < data.length; index += 4) { const red = contrastFactor * (data[index] - 128) + 128 + brightness; const green = contrastFactor * (data[index + 1] - 128) + 128 + brightness; const blue = contrastFactor * (data[index + 2] - 128) + 128 + brightness; const gray = 0.299 * red + 0.587 * green + 0.114 * blue; data[index] = clamp(gray + (red - gray) * saturationFactor); data[index + 1] = clamp(gray + (green - gray) * saturationFactor); data[index + 2] = clamp(gray + (blue - gray) * saturationFactor); } targetCtx.putImageData(imageData); if (els.sharpen.checked) sharpenImage(targetCtx, width, height); }
-function sharpenImage(targetCtx, width, height) { const imageData = targetCtx.getImageData(0, 0, width, height); const src = imageData.data; const out = new Uint8ClampedArray(src); const kernel = [0, -0.45, 0, -0.45, 2.8, -0.45, 0, -0.45, 0]; for (let y = 1; y < height - 1; y += 1) for (let x = 1; x < width - 1; x += 1) { const pixel = (y * width + x) * 4; for (let channel = 0; channel < 3; channel += 1) { let value = 0; let kernelIndex = 0; for (let ky = -1; ky <= 1; ky += 1) for (let kx = -1; kx <= 1; kx += 1) { value += src[((y + ky) * width + x + kx) * 4 + channel] * kernel[kernelIndex++]; } out[pixel + channel] = clamp(value); } } targetCtx.putImageData(new ImageData(out, width, height)); }
-function drawLogo(targetCtx, width, height) { const logo = getSelectedLogo(); if (!logo) return; const placement = getLogoPlacement(targetCtx, width, height, logo); targetCtx.save(); targetCtx.globalAlpha = Number(els.logoOpacity.value) / 100; targetCtx.drawImage(logo.img, placement.x, placement.y, placement.width, placement.height); targetCtx.restore(); }
-function getLogoPlacement(targetCtx, width, height, logo) { const logoWidth = Math.round(width * Number(els.logoSize.value) / 100); const logoHeight = Math.round(logoWidth * logo.img.naturalHeight / logo.img.naturalWidth); const margin = Math.round(Math.min(width, height) * Number(els.logoMargin.value) / 100); const placements = { "bottom-right": [width - logoWidth - margin, height - logoHeight - margin], "bottom-left": [margin, height - logoHeight - margin], "top-right": [width - logoWidth - margin, margin], "top-left": [margin, margin], center: [(width - logoWidth) / 2, (height - logoHeight) / 2] }; let [x, y] = placements[state.position] || placements["bottom-right"]; if (state.position === "smart") [x, y] = findBestPlacement(targetCtx, width, height, logoWidth, logoHeight, margin, logo); return { x: Math.round(x), y: Math.round(y), width: logoWidth, height: logoHeight }; }
-function findBestPlacement(targetCtx, width, height, logoWidth, logoHeight, margin, logo) { const choices = [[margin, margin], [width - logoWidth - margin, margin], [margin, height - logoHeight - margin], [width - logoWidth - margin, height - logoHeight - margin], [(width - logoWidth) / 2, margin], [(width - logoWidth) / 2, height - logoHeight - margin]]; const logoBrightness = imageBrightness(logo.img); return choices.reduce((best, choice) => { const score = regionContrastScore(targetCtx, choice[0], choice[1], logoWidth, logoHeight, logoBrightness); return score > best.score ? { choice, score } : best; }, { choice: choices[0], score: -Infinity }).choice; }
-function imageBrightness(img) { const canvas = document.createElement("canvas"); canvas.width = canvas.height = 24; const c = canvas.getContext("2d", { willReadFrequently: true }); c.drawImage(img, 0, 0, 24, 24); const data = c.getImageData(0, 0, 24, 24).data; let total = 0; let count = 0; for (let i = 0; i < data.length; i += 4) { if (data[i + 3] > 16) { total += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]; count += 1; } } return count ? total / count : 128; }
-function regionContrastScore(targetCtx, x, y, width, height, logoBrightness) { const imageData = targetCtx.getImageData(Math.max(0, Math.round(x)), Math.max(0, Math.round(y)), Math.max(1, Math.round(width)), Math.max(1, Math.round(height))).data; let sum = 0; let sumSq = 0; const count = imageData.length / 4; for (let i = 0; i < imageData.length; i += 4) { const value = 0.299 * imageData[i] + 0.587 * imageData[i + 1] + 0.114 * imageData[i + 2]; sum += value; sumSq += value * value; } const mean = sum / count; const deviation = Math.sqrt(sumSq / count - mean * mean); return Math.abs(mean - logoBrightness) - deviation * 0.25; }
-async function renderImageBlob(image) { const canvas = document.createElement("canvas"); canvas.width = image.img.naturalWidth; canvas.height = image.img.naturalHeight; const targetCtx = canvas.getContext("2d", { willReadFrequently: true }); targetCtx.drawImage(image.img, 0, 0); applyAdjustments(targetCtx, canvas.width, canvas.height); drawLogo(targetCtx, canvas.width, canvas.height); return new Promise((resolve) => canvas.toBlob(resolve, els.format.value, Number(els.quality.value) / 100)); }
-function updateStatus() { const count = state.images.length; const scopeCount = getExportImages().length; els.fileCount.textContent = `${count} 张图片`; els.clearAll.disabled = count === 0 && state.logos.length === 0; els.downloadCurrent.disabled = count === 0; els.downloadZip.disabled = count === 0; els.statusText.textContent = !count ? "添加图片后开始处理" : `${state.ratioFilter === "all" ? "全部比例" : state.ratioFilter}，将导出 ${scopeCount} 张`; }
-function makeOutputName(name) { const extensionMap = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }; return `${stripExtension(name)}-edited.${extensionMap[els.format.value]}`; }
-function downloadBlob(blob, name) { const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-function createZip(files) { const encoder = new TextEncoder(); const localParts = []; const centralParts = []; let offset = 0; files.forEach((file) => { const nameBytes = encoder.encode(file.name); const crc = crc32(file.bytes); const localHeader = new Uint8Array(30 + nameBytes.length); const localView = new DataView(localHeader.buffer); localView.setUint32(0, 0x04034b50, true); localView.setUint16(4, 20, true); localView.setUint32(14, crc, true); localView.setUint32(18, file.bytes.length, true); localView.setUint32(22, file.bytes.length, true); localView.setUint16(26, nameBytes.length, true); localHeader.set(nameBytes, 30); localParts.push(localHeader, file.bytes); const centralHeader = new Uint8Array(46 + nameBytes.length); const centralView = new DataView(centralHeader.buffer); centralView.setUint32(0, 0x02014b50, true); centralView.setUint16(4, 20, true); centralView.setUint16(6, 20, true); centralView.setUint32(16, crc, true); centralView.setUint32(20, file.bytes.length, true); centralView.setUint32(24, file.bytes.length, true); centralView.setUint16(28, nameBytes.length, true); centralView.setUint32(42, offset, true); centralHeader.set(nameBytes, 46); centralParts.push(centralHeader); offset += localHeader.length + file.bytes.length; }); const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0); const end = new Uint8Array(22); const endView = new DataView(end.buffer); endView.setUint32(0, 0x06054b50, true); endView.setUint16(8, files.length, true); endView.setUint16(10, files.length, true); endView.setUint32(12, centralSize, true); endView.setUint32(16, offset, true); return new Blob([...localParts, ...centralParts, end], { type: "application/zip" }); }
-function crc32(bytes) { let crc = -1; for (let index = 0; index < bytes.length; index += 1) crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff]; return (crc ^ -1) >>> 0; }
-const crcTable = (() => { const table = new Uint32Array(256); for (let n = 0; n < 256; n += 1) { let c = n; for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c >>> 0; } return table; })();
-function clamp(value) { return Math.max(0, Math.min(255, Math.round(value))); }
+
+function syncControlsFromGroup() {
+  const group = getActiveGroup();
+  const adjustments = group?.adjustments || { brightness: 0, contrast: 0, saturation: 0 };
+  els.brightness.value = adjustments.brightness;
+  els.contrast.value = adjustments.contrast;
+  els.saturation.value = adjustments.saturation;
+  syncOverlayControls();
+  updateControlLabels();
+}
+
+function syncOverlayControls() {
+  const overlay = getSelectedOverlay();
+  els.placementControls.hidden = !overlay;
+  if (!overlay) return;
+  els.logoSize.value = Math.round(overlay.width * 100);
+  els.logoOpacity.value = Math.round(overlay.opacity * 100);
+  updateControlLabels();
+}
+
+function updateControlLabels() {
+  els.logoSizeValue.textContent = `${els.logoSize.value}%`;
+  els.logoOpacityValue.textContent = `${els.logoOpacity.value}%`;
+  els.brightnessValue.textContent = signedValue(els.brightness.value);
+  els.contrastValue.textContent = signedValue(els.contrast.value);
+  els.saturationValue.textContent = signedValue(els.saturation.value);
+  els.qualityValue.textContent = `${els.quality.value}%`;
+}
+
+function renderPreview() {
+  const image = getActiveImage();
+  const group = getActiveGroup();
+  if (!image || !group) {
+    previewCtx.clearRect(0, 0, els.previewCanvas.width, els.previewCanvas.height);
+    els.previewCanvas.style.width = "";
+    els.previewCanvas.style.height = "";
+    els.emptyState.classList.remove("hidden");
+    els.previewCanvas.classList.remove("can-drag");
+    return;
+  }
+  els.emptyState.classList.add("hidden");
+  drawBaseImage(image, group, els.previewCanvas, previewCtx);
+  drawOverlays(previewCtx, els.previewCanvas.width, els.previewCanvas.height, group, true);
+  fitPreviewCanvas();
+  els.previewCanvas.classList.toggle("can-drag", group.overlays.length > 0);
+}
+
+function fitPreviewCanvas() {
+  const stage = els.previewCanvas.parentElement;
+  if (!stage || !getActiveImage()) return;
+  const maxWidth = Math.max(180, stage.clientWidth - 40);
+  const maxHeight = Math.max(220, stage.clientHeight - 40);
+  const scale = Math.min(maxWidth / els.previewCanvas.width, maxHeight / els.previewCanvas.height, 1);
+  els.previewCanvas.style.width = `${Math.round(els.previewCanvas.width * scale)}px`;
+  els.previewCanvas.style.height = `${Math.round(els.previewCanvas.height * scale)}px`;
+}
+
+function drawBaseImage(image, group, canvas, ctx, targetDimensions = null) {
+  const dimensions = targetDimensions || previewDimensions(image.width, image.height);
+  canvas.width = dimensions.width;
+  canvas.height = dimensions.height;
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.filter = adjustmentFilter(group.adjustments);
+  ctx.drawImage(image.img, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+function drawOverlays(ctx, width, height, group, showSelection) {
+  group.overlays.forEach((overlay) => {
+    const logo = getLogoById(overlay.logoId);
+    if (!logo?.img) return;
+    const rect = overlayRect(overlay, width, height);
+    ctx.save();
+    ctx.globalAlpha = overlay.opacity;
+    ctx.drawImage(logo.img, rect.x, rect.y, rect.width, rect.height);
+    ctx.restore();
+    if (showSelection && overlay.id === state.selectedOverlayId) drawSelection(ctx, rect);
+  });
+}
+
+function drawSelection(ctx, rect) {
+  ctx.save();
+  ctx.fillStyle = "rgba(45, 95, 194, 0.12)";
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.strokeStyle = "#2d5fc2";
+  ctx.lineWidth = Math.max(6, els.previewCanvas.width / 150);
+  ctx.setLineDash([18, 10]);
+  ctx.strokeRect(rect.x - 3, rect.y - 3, rect.width + 6, rect.height + 6);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#2d5fc2";
+  ctx.lineWidth = Math.max(4, els.previewCanvas.width / 220);
+  const size = Math.max(20, els.previewCanvas.width / 45);
+  [[rect.x, rect.y], [rect.x + rect.width, rect.y], [rect.x, rect.y + rect.height], [rect.x + rect.width, rect.y + rect.height]].forEach(([x, y]) => {
+    ctx.fillRect(x - size / 2, y - size / 2, size, size);
+    ctx.strokeRect(x - size / 2, y - size / 2, size, size);
+  });
+  ctx.restore();
+}
+
+async function downloadCurrentImage() {
+  const image = getActiveImage();
+  const group = getActiveGroup();
+  if (!image || !group || state.exporting) return;
+  try {
+    setExporting(true, 0);
+    const blob = await renderImageBlob(image, group);
+    triggerDownload(blob, outputName(image.file.name));
+    showNotice("当前图片已生成并开始下载。", true);
+  } catch (error) {
+    showNotice(`导出失败：${error.message}`, false);
+  } finally {
+    setExporting(false, 0);
+  }
+}
+
+async function downloadActiveGroup() {
+  const group = getActiveGroup();
+  if (!group || state.exporting) return;
+  const images = group.imageIds.map(getImageById).filter(Boolean);
+  if (!images.length) return;
+  const entries = [];
+  try {
+    setExporting(true, 0);
+    for (let index = 0; index < images.length; index += 1) {
+      const image = images[index];
+      const blob = await renderImageBlob(image, group);
+      if (!blob?.size) throw new Error(`${image.file.name} 未生成有效图片`);
+      entries.push({ name: `${String(index + 1).padStart(3, "0")}-${outputName(image.file.name)}`, bytes: new Uint8Array(await blob.arrayBuffer()) });
+      setExporting(true, (index + 1) / images.length);
+      await yieldToBrowser();
+    }
+    const zip = createStoredZip(entries);
+    if (!zip.size) throw new Error("ZIP 文件为空");
+    const groupIndex = state.groups.findIndex((item) => item.id === group.id) + 1;
+    triggerDownload(zip, `任务${groupIndex}-${safeFilePart(group.label)}-${images.length}张.zip`);
+    showNotice(`任务 ${groupIndex} 已生成 ${images.length} 张图片，ZIP 大小 ${formatBytes(zip.size)}。`, true);
+  } catch (error) {
+    showNotice(`批量导出失败：${error.message}`, false);
+  } finally {
+    setExporting(false, 0);
+  }
+}
+
+async function renderImageBlob(image, group) {
+  const dimensions = exportDimensions(image.width, image.height, Number(els.maxEdge.value));
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  drawBaseImage(image, group, canvas, ctx, dimensions);
+  drawOverlays(ctx, dimensions.width, dimensions.height, group, false);
+  const type = els.format.value;
+  const quality = type === "image/png" ? undefined : Number(els.quality.value) / 100;
+  const blob = await canvasToBlob(canvas, type, quality);
+  canvas.width = 1;
+  canvas.height = 1;
+  return blob;
+}
+
+function setExporting(active, progress) {
+  state.exporting = active;
+  els.exportProgress.hidden = !active;
+  els.exportProgressBar.style.width = `${Math.round(progress * 100)}%`;
+  els.downloadGroup.textContent = active ? `正在生成 ${Math.round(progress * 100)}%` : "导出当前比例组 ZIP";
+  updateButtons();
+}
+
+function updateButtons() {
+  const hasGroup = Boolean(getActiveGroup());
+  const hasImage = Boolean(getActiveImage());
+  els.clearAll.disabled = state.images.length === 0;
+  els.addLogoToJob.disabled = !hasGroup || !getSelectedLogo();
+  els.downloadCurrent.disabled = !hasImage || state.exporting;
+  els.downloadGroup.disabled = !hasGroup || state.exporting;
+}
+
+function updateGlobalStatus() {
+  els.imageCount.textContent = `${state.images.length} 张`;
+  els.globalStatus.textContent = state.images.length ? `${state.groups.length} 个比例任务 · ${state.images.length} 张图片` : "等待添加图片";
+}
+
+function restoreLogoLibrary() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LOGO_STORAGE_KEY) || "[]");
+    saved.forEach((item) => {
+      const img = new Image();
+      img.onload = renderPreview;
+      img.src = item.dataUrl;
+      state.logos.push({ ...item, img });
+    });
+    state.selectedLogoId = state.logos[0]?.id || null;
+  } catch (error) {
+    localStorage.removeItem(LOGO_STORAGE_KEY);
+  }
+}
+
+function persistLogoLibrary() {
+  const serializable = state.logos.map(({ id, name, group, dataUrl }) => ({ id, name, group, dataUrl }));
+  try {
+    localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(serializable));
+  } catch (error) {
+    showNotice("Logo 库已载入，但浏览器存储空间不足，刷新后可能不会保留。", false);
+  }
+}
+
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve({ id: uid(), file, img, url, width: img.naturalWidth, height: img.naturalHeight, groupId: null });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(`无法读取 ${file.name}`)); };
+    img.src = url;
+  });
+}
+
+async function loadLogoFile(file) {
+  const dataUrl = await fileToDataUrl(file);
+  const img = await loadImageSource(dataUrl);
+  return { id: uid(), name: stripExtension(file.name), group: "未分组", dataUrl, img };
+}
+
+function loadImageSource(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function getActiveGroup() { return state.groups.find((group) => group.id === state.activeGroupId) || null; }
+function getActiveImage() { return getImageById(state.activeImageId); }
+function getImageById(id) { return state.images.find((image) => image.id === id) || null; }
+function getSelectedLogo() { return getLogoById(state.selectedLogoId); }
+function getLogoById(id) { return state.logos.find((logo) => logo.id === id) || null; }
+function getSelectedOverlay() { return getActiveGroup()?.overlays.find((overlay) => overlay.id === state.selectedOverlayId) || null; }
+
+function overlayRect(overlay, imageWidth, imageHeight) {
+  const logo = getLogoById(overlay.logoId);
+  const width = imageWidth * overlay.width;
+  const height = logo ? width * logo.img.naturalHeight / logo.img.naturalWidth : 0;
+  return { x: imageWidth * overlay.x, y: imageHeight * overlay.y, width, height };
+}
+
+function overlayHeightNormalized(overlay, logo, imageRatio) {
+  return overlay.width * imageRatio * logo.img.naturalHeight / logo.img.naturalWidth;
+}
+
+function previewDimensions(width, height) {
+  const maxDimension = 1400;
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+function exportDimensions(width, height, maxEdge) {
+  if (!maxEdge || Math.max(width, height) <= maxEdge) return { width, height };
+  const scale = maxEdge / Math.max(width, height);
+  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+}
+
+function adjustmentFilter(adjustments) {
+  return `brightness(${100 + adjustments.brightness}%) contrast(${100 + adjustments.contrast}%) saturate(${100 + adjustments.saturation}%)`;
+}
+
+function ratioLabel(ratio) {
+  const common = [
+    [16 / 9, "16:9 横图"], [3 / 2, "3:2 横图"], [4 / 3, "4:3 横图"], [5 / 4, "5:4 横图"],
+    [1, "1:1 方图"], [4 / 5, "4:5 竖图"], [3 / 4, "3:4 竖图"], [2 / 3, "2:3 竖图"], [9 / 16, "9:16 竖图"],
+  ];
+  const matched = common.find(([value]) => Math.abs(value - ratio) < 0.015);
+  if (matched) return matched[1];
+  const side = ratio > 1 ? "横图" : "竖图";
+  return `${ratio.toFixed(3)}:1 ${side}`;
+}
+
+function getLogoLightness(logo) {
+  if (Number.isFinite(logo.lightness)) return logo.lightness;
+  const canvas = document.createElement("canvas");
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(logo.img, 0, 0, 32, 32);
+  const data = ctx.getImageData(0, 0, 32, 32).data;
+  let total = 0;
+  let count = 0;
+  for (let index = 0; index < data.length; index += 4) {
+    if (data[index + 3] < 20) continue;
+    total += 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+    count += 1;
+  }
+  logo.lightness = count ? total / count : 128;
+  return logo.lightness;
+}
+
+function contrastScore(ctx, x, y, width, height, logoLightness) {
+  const px = Math.max(0, Math.round(x * ctx.canvas.width));
+  const py = Math.max(0, Math.round(y * ctx.canvas.height));
+  const pw = Math.max(1, Math.min(ctx.canvas.width - px, Math.round(width * ctx.canvas.width)));
+  const ph = Math.max(1, Math.min(ctx.canvas.height - py, Math.round(height * ctx.canvas.height)));
+  const data = ctx.getImageData(px, py, pw, ph).data;
+  const stride = Math.max(4, Math.floor(data.length / 1200 / 4) * 4);
+  let sum = 0;
+  let sumSquared = 0;
+  let count = 0;
+  for (let index = 0; index < data.length; index += stride) {
+    const lightness = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+    sum += lightness;
+    sumSquared += lightness * lightness;
+    count += 1;
+  }
+  const mean = sum / count;
+  const deviation = Math.sqrt(Math.max(0, sumSquared / count - mean * mean));
+  return Math.abs(mean - logoLightness) - deviation * 0.35;
+}
+
+function createStoredZip(entries) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const { time, date } = dosDateTime(new Date());
+  entries.forEach((entry) => {
+    const name = encoder.encode(entry.name);
+    const crc = crc32(entry.bytes);
+    const local = new Uint8Array(30 + name.length);
+    const localView = new DataView(local.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, time, true);
+    localView.setUint16(12, date, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, entry.bytes.length, true);
+    localView.setUint32(22, entry.bytes.length, true);
+    localView.setUint16(26, name.length, true);
+    localView.setUint16(28, 0, true);
+    local.set(name, 30);
+    localParts.push(local, entry.bytes);
+
+    const central = new Uint8Array(46 + name.length);
+    const centralView = new DataView(central.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0800, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, time, true);
+    centralView.setUint16(14, date, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, entry.bytes.length, true);
+    centralView.setUint32(24, entry.bytes.length, true);
+    centralView.setUint16(28, name.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, offset, true);
+    central.set(name, 46);
+    centralParts.push(central);
+    offset += local.length + entry.bytes.length;
+  });
+  const centralSize = centralParts.reduce((total, part) => total + part.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(4, 0, true);
+  endView.setUint16(6, 0, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+  endView.setUint16(20, 0, true);
+  return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+}
+
+function dosDateTime(value) {
+  const year = Math.max(1980, value.getFullYear());
+  return {
+    time: (value.getHours() << 11) | (value.getMinutes() << 5) | Math.floor(value.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((value.getMonth() + 1) << 5) | value.getDate(),
+  };
+}
+
+const crcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let number = 0; number < 256; number += 1) {
+    let value = number;
+    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[number] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = -1;
+  for (let index = 0; index < bytes.length; index += 1) crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff];
+  return (crc ^ -1) >>> 0;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("浏览器没有生成图片数据")), type, quality);
+  });
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function outputName(filename) {
+  const extensions = { "image/jpeg": "jpg", "image/webp": "webp", "image/png": "png" };
+  return `${stripExtension(filename)}-已处理.${extensions[els.format.value]}`;
+}
+
+function showNotice(message, success) {
+  els.notice.textContent = message;
+  els.notice.classList.toggle("success", success);
+  els.notice.hidden = false;
+}
+
+function hideNotice() { els.notice.hidden = true; }
+function isImageFile(file) { return file.type.startsWith("image/"); }
+function uid() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+function stripExtension(name) { return name.replace(/\.[^.]+$/, ""); }
+function signedValue(value) { const number = Number(value); return number > 0 ? `+${number}` : String(number); }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function groupBy(items, keyFn) { return items.reduce((groups, item) => { const key = keyFn(item); (groups[key] ||= []).push(item); return groups; }, {}); }
+function safeFilePart(value) { return value.replace(/[\\/:*?"<>|]/g, "-"); }
+function formatBytes(bytes) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
+function yieldToBrowser() { return new Promise((resolve) => requestAnimationFrame(() => resolve())); }
 function escapeHtml(value) { const node = document.createElement("div"); node.textContent = value; return node.innerHTML; }
-updateValueLabels(); renderLogoLibrary();

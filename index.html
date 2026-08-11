@@ -2,100 +2,160 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>批量修图</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="按图片比例分组，批量添加 Logo、调色并高清压缩导出。" />
+    <title>批量P图工作台</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">P</div>
+        <div>
+          <h1>批量P图工作台</h1>
+          <p>图片仅在你的浏览器里处理</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="globalStatus" class="status-pill">等待添加图片</span>
+        <button id="clearAll" class="quiet-button" disabled>清空任务</button>
+      </div>
+    </header>
+
     <main class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <div class="brand-mark">P</div>
+      <aside class="jobs-sidebar">
+        <div class="sidebar-heading">
           <div>
-            <h1>批量修图</h1>
-            <p>所有图片仅在本机浏览器中处理</p>
+            <span class="eyebrow">批处理任务</span>
+            <h2>比例分组</h2>
           </div>
+          <span id="imageCount" class="count-badge">0 张</span>
         </div>
 
-        <section class="panel">
-          <h2>图片素材</h2>
-          <label class="drop-zone" for="imageInput">
-            <span>添加图片</span>
-            <small>JPG、PNG、WebP，可多选或拖入</small>
-          </label>
-          <input id="imageInput" type="file" accept="image/*" multiple />
-          <label class="compact-field">
-            处理范围
-            <select id="exportScope">
-              <option value="ratio">当前比例组</option>
-              <option value="all">全部图片</option>
-            </select>
-          </label>
-        </section>
+        <label class="upload-zone" for="imageInput">
+          <span class="upload-icon">+</span>
+          <strong>添加一批图片</strong>
+          <small>系统会按实际比例自动拆成任务</small>
+        </label>
+        <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple />
 
-        <section class="panel">
-          <div class="section-heading">
-            <h2>Logo 库</h2>
-            <label class="icon-upload" for="logoInput" title="添加 Logo">+</label>
-          </div>
-          <input id="logoInput" type="file" accept="image/*" multiple />
-          <div id="logoLibrary" class="logo-library"><p class="hint">添加透明 PNG 后，会保存在本次工作中。</p></div>
-          <label class="compact-field">
-            当前 Logo 名称
-            <input id="logoName" type="text" placeholder="例如：白色横排" />
-          </label>
-          <label class="compact-field">
-            Logo 分组
-            <input id="logoGroup" type="text" placeholder="例如：品牌主标" />
-          </label>
-        </section>
-
-        <section class="panel">
-          <h2>Logo 位置</h2>
-          <div class="segmented" role="group" aria-label="Logo 位置">
-            <button class="active" data-position="bottom-right">右下</button>
-            <button data-position="bottom-left">左下</button>
-            <button data-position="top-right">右上</button>
-            <button data-position="top-left">左上</button>
-            <button data-position="center">居中</button>
-            <button data-position="smart">智能避色</button>
-          </div>
-          <label>Logo 宽度 <output id="logoSizeValue">18%</output><input id="logoSize" type="range" min="4" max="60" value="18" /></label>
-          <label>边距 <output id="logoMarginValue">4%</output><input id="logoMargin" type="range" min="0" max="20" value="4" /></label>
-          <label>透明度 <output id="logoOpacityValue">92%</output><input id="logoOpacity" type="range" min="10" max="100" value="92" /></label>
-        </section>
-
-        <section class="panel">
-          <h2>基础修图</h2>
-          <label>亮度 <output id="brightnessValue">0</output><input id="brightness" type="range" min="-60" max="60" value="0" /></label>
-          <label>对比度 <output id="contrastValue">8</output><input id="contrast" type="range" min="-60" max="60" value="8" /></label>
-          <label>饱和度 <output id="saturationValue">8</output><input id="saturation" type="range" min="-60" max="80" value="8" /></label>
-          <label class="checkbox"><input id="sharpen" type="checkbox" /><span>轻微锐化</span></label>
-        </section>
-
-        <section class="panel">
-          <h2>高清导出</h2>
-          <div class="field-row">
-            <label>格式<select id="format"><option value="image/jpeg">JPG</option><option value="image/webp">WebP</option><option value="image/png">PNG</option></select></label>
-            <label>质量 <output id="qualityValue">92%</output><input id="quality" type="range" min="50" max="100" value="92" /></label>
-          </div>
-          <button id="downloadCurrent" class="action ghost" disabled>下载当前图片</button>
-          <button id="downloadZip" class="action" disabled>导出并打包 ZIP</button>
-        </section>
+        <div id="groupList" class="group-list" aria-label="比例任务列表">
+          <div class="sidebar-empty">添加图片后，这里会出现“任务 1、任务 2…”</div>
+        </div>
       </aside>
 
       <section class="workspace">
-        <div class="topbar">
-          <div><strong id="fileCount">0 张图片</strong><span id="statusText">添加图片后开始处理</span></div>
-          <div class="toolbar"><label>查看比例<select id="ratioFilter"><option value="all">全部</option></select></label><button id="clearAll" class="small-button" disabled>清空</button></div>
+        <div class="workspace-toolbar">
+          <div>
+            <span class="eyebrow">当前任务</span>
+            <h2 id="activeGroupTitle">尚未选择比例任务</h2>
+          </div>
+          <div class="preview-meta">
+            <strong id="activeImageName">暂无图片</strong>
+            <span id="activeImageMeta">添加图片后可预览</span>
+          </div>
         </div>
-        <div class="preview-wrap">
-          <canvas id="previewCanvas" width="1200" height="800"></canvas>
-          <div id="emptyState" class="empty-state"><strong>添加图片和 Logo</strong><span>选择一个比例组，设置一次规则，批量完成整组图片。</span></div>
+
+        <div id="notice" class="notice" role="status" hidden></div>
+
+        <div class="preview-stage">
+          <canvas id="previewCanvas" width="1200" height="800" aria-label="图片与 Logo 实时预览"></canvas>
+          <div id="emptyState" class="empty-state">
+            <strong>先添加图片</strong>
+            <span>相同比例会自动放进同一个批处理任务。</span>
+          </div>
         </div>
-        <div id="thumbs" class="thumbs" aria-label="图片列表"></div>
+
+        <div class="filmstrip-wrap">
+          <div class="filmstrip-heading">
+            <strong>组内图片</strong>
+            <span id="groupImageCount">0 张</span>
+          </div>
+          <div id="thumbs" class="thumbs" aria-label="当前任务图片列表"></div>
+        </div>
       </section>
+
+      <aside class="tools-sidebar">
+        <section class="tool-section">
+          <div class="section-heading">
+            <div>
+              <span class="step-number">1</span>
+              <h2>Logo 库</h2>
+            </div>
+            <label class="icon-button" for="logoInput" title="添加 Logo">+</label>
+          </div>
+          <input id="logoInput" type="file" accept="image/png,image/webp,image/jpeg" multiple />
+          <div id="logoLibrary" class="logo-library">
+            <p class="tool-empty">添加 Logo 后可视化选择，名称会自动保存。</p>
+          </div>
+          <div id="logoEditor" class="logo-editor" hidden>
+            <label>名称<input id="logoName" type="text" placeholder="白色横排" /></label>
+            <label>品牌组<input id="logoGroup" type="text" placeholder="主品牌" /></label>
+            <div class="inline-actions">
+              <button id="addLogoToJob" class="primary-button" disabled>添加到当前任务</button>
+              <button id="deleteLogo" class="danger-button" title="从 Logo 库删除">删除</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="tool-section">
+          <div class="section-heading">
+            <div>
+              <span class="step-number">2</span>
+              <h2>Logo 组合与位置</h2>
+            </div>
+            <span id="overlayCount" class="count-badge">0 个</span>
+          </div>
+          <div id="overlayList" class="overlay-list">
+            <p class="tool-empty">从 Logo 库一键添加，可叠加多个 Logo。</p>
+          </div>
+          <div id="placementControls" hidden>
+            <div class="position-grid" role="group" aria-label="Logo 快速位置">
+              <button data-position="top-left">左上</button>
+              <button data-position="top-right">右上</button>
+              <button data-position="center">居中</button>
+              <button data-position="bottom-left">左下</button>
+              <button data-position="bottom-right">右下</button>
+              <button id="autoPlace">智能避色</button>
+            </div>
+            <label class="range-field"><span>大小 <output id="logoSizeValue">18%</output></span><input id="logoSize" type="range" min="3" max="60" value="18" /></label>
+            <label class="range-field"><span>透明度 <output id="logoOpacityValue">100%</output></span><input id="logoOpacity" type="range" min="10" max="100" value="100" /></label>
+            <button id="removeOverlay" class="text-button">从当前任务移除</button>
+          </div>
+        </section>
+
+        <section class="tool-section">
+          <div class="section-heading">
+            <div>
+              <span class="step-number">3</span>
+              <h2>整组基础修图</h2>
+            </div>
+            <button id="resetAdjustments" class="text-button">重置</button>
+          </div>
+          <label class="range-field"><span>亮度 <output id="brightnessValue">0</output></span><input id="brightness" type="range" min="-40" max="60" value="0" /></label>
+          <label class="range-field"><span>对比度 <output id="contrastValue">0</output></span><input id="contrast" type="range" min="-40" max="60" value="0" /></label>
+          <label class="range-field"><span>饱和度 <output id="saturationValue">0</output></span><input id="saturation" type="range" min="-50" max="80" value="0" /></label>
+        </section>
+
+        <section class="tool-section export-section">
+          <div class="section-heading">
+            <div>
+              <span class="step-number">4</span>
+              <h2>高清压缩导出</h2>
+            </div>
+          </div>
+          <div class="two-columns">
+            <label>格式<select id="format"><option value="image/jpeg">JPG</option><option value="image/webp">WebP</option><option value="image/png">PNG</option></select></label>
+            <label>最长边<select id="maxEdge"><option value="0">保持原尺寸</option><option value="4096">4096 px</option><option value="2560">2560 px</option><option value="1920">1920 px</option></select></label>
+          </div>
+          <label class="range-field"><span>压缩质量 <output id="qualityValue">92%</output></span><input id="quality" type="range" min="55" max="100" value="92" /></label>
+          <div id="exportProgress" class="export-progress" hidden><div id="exportProgressBar"></div></div>
+          <button id="downloadCurrent" class="secondary-button" disabled>下载当前预览</button>
+          <button id="downloadGroup" class="primary-button export-button" disabled>导出当前比例组 ZIP</button>
+        </section>
+      </aside>
     </main>
+
     <script src="./app.js"></script>
   </body>
 </html>
