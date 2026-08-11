@@ -1,16 +1,31 @@
 const LOGO_STORAGE_KEY = "batch-photo-logo-library-v2";
+const PRESET_STORAGE_KEY = "batch-photo-logo-presets-v1";
 const GROUP_TOLERANCE = 0.008;
 
 const state = {
   images: [],
   groups: [],
   logos: [],
+  presets: [],
   activeGroupId: null,
   activeImageId: null,
-  selectedLogoId: null,
+  focusedLogoId: null,
+  selectedLogoIds: new Set(),
   selectedOverlayId: null,
+  activePresetId: null,
   drag: null,
   exporting: false,
+  cutout: {
+    files: [],
+    index: 0,
+    file: null,
+    originalCanvas: null,
+    mode: "wand",
+    drawing: false,
+    lastPoint: null,
+    history: [],
+    previewUrl: null,
+  },
 };
 
 const elementIds = [
@@ -18,20 +33,28 @@ const elementIds = [
   "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
   "previewCanvas", "emptyState", "notice", "logoLibrary", "logoEditor",
   "logoName", "logoGroup", "addLogoToJob", "deleteLogo", "overlayCount", "overlayList",
+  "presetList", "presetName", "savePreset", "updatePreset", "activePresetStatus",
   "placementControls", "autoPlace", "logoSize", "logoSizeValue", "logoOpacity",
   "logoOpacityValue", "removeOverlay", "brightness", "brightnessValue", "contrast",
   "contrastValue", "saturation", "saturationValue", "resetAdjustments", "format", "maxEdge",
   "quality", "qualityValue", "downloadCurrent", "downloadGroup", "exportProgress",
   "exportProgressBar",
+  "cutoutModal", "closeCutout", "cancelCutout", "saveCutout", "autoCutout",
+  "undoCutout", "resetCutout", "cutoutStage", "cutoutCanvas", "cutoutPreview",
+  "cutoutTolerance", "cutoutToleranceValue", "cutoutBrush", "cutoutBrushValue",
+  "cutoutName", "cutoutGroup", "trimTransparent", "cutoutStatus", "cutoutQueueStatus",
 ];
 const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 els.positionButtons = [...document.querySelectorAll("[data-position]")];
+els.cutoutModeButtons = [...document.querySelectorAll("[data-cutout-mode]")];
 const previewCtx = els.previewCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+const cutoutCtx = els.cutoutCanvas.getContext("2d", { willReadFrequently: true });
 
 initialize();
 
 function initialize() {
   restoreLogoLibrary();
+  restorePresets();
   bindEvents();
   renderAll();
 }
@@ -42,8 +65,10 @@ function bindEvents() {
   els.clearAll.addEventListener("click", clearTasks);
   els.logoName.addEventListener("change", () => updateLogoMeta("name", els.logoName.value));
   els.logoGroup.addEventListener("change", () => updateLogoMeta("group", els.logoGroup.value));
-  els.addLogoToJob.addEventListener("click", addSelectedLogoToJob);
-  els.deleteLogo.addEventListener("click", deleteSelectedLogo);
+  els.addLogoToJob.addEventListener("click", addSelectedLogosToJob);
+  els.deleteLogo.addEventListener("click", deleteSelectedLogos);
+  els.savePreset.addEventListener("click", saveCurrentPreset);
+  els.updatePreset.addEventListener("click", updateCurrentPreset);
   els.removeOverlay.addEventListener("click", removeSelectedOverlay);
   els.autoPlace.addEventListener("click", autoPlaceSelectedOverlay);
   els.positionButtons.forEach((button) => button.addEventListener("click", () => placeSelectedOverlay(button.dataset.position)));
@@ -54,6 +79,21 @@ function bindEvents() {
   els.quality.addEventListener("input", updateControlLabels);
   els.downloadCurrent.addEventListener("click", downloadCurrentImage);
   els.downloadGroup.addEventListener("click", downloadActiveGroup);
+
+  els.closeCutout.addEventListener("click", closeCutoutEditor);
+  els.cancelCutout.addEventListener("click", closeCutoutEditor);
+  els.saveCutout.addEventListener("click", saveCutoutLogo);
+  els.autoCutout.addEventListener("click", autoRemoveBackground);
+  els.undoCutout.addEventListener("click", undoCutout);
+  els.resetCutout.addEventListener("click", resetCutout);
+  els.cutoutTolerance.addEventListener("input", updateCutoutLabels);
+  els.cutoutBrush.addEventListener("input", updateCutoutLabels);
+  els.cutoutModeButtons.forEach((button) => button.addEventListener("click", () => setCutoutMode(button.dataset.cutoutMode)));
+  els.cutoutCanvas.addEventListener("pointerdown", startCutoutAction);
+  els.cutoutCanvas.addEventListener("pointermove", moveCutoutAction);
+  els.cutoutCanvas.addEventListener("pointerup", endCutoutAction);
+  els.cutoutCanvas.addEventListener("pointercancel", endCutoutAction);
+  document.addEventListener("keydown", handleModalKeydown);
 
   els.previewCanvas.addEventListener("pointerdown", startOverlayDrag);
   els.previewCanvas.addEventListener("pointermove", moveOverlayDrag);
@@ -79,15 +119,293 @@ async function handleImageUpload(event) {
 async function handleLogoUpload(event) {
   const files = [...event.target.files].filter(isImageFile);
   if (!files.length) return;
-  const results = await Promise.allSettled(files.map(loadLogoFile));
-  const loaded = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
-  state.logos.push(...loaded);
-  if (loaded[0]) state.selectedLogoId = loaded[0].id;
-  persistLogoLibrary();
-  renderLogoLibrary();
-  renderLogoEditor();
-  updateButtons();
+  state.cutout.files = files;
+  state.cutout.index = 0;
+  await openCutoutFile(files[0]);
   event.target.value = "";
+}
+
+async function openCutoutFile(file) {
+  try {
+    const dataUrl = await fileToDataUrl(file);
+    const image = await loadImageSource(dataUrl);
+    const maxSide = 1600;
+    const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const originalCanvas = document.createElement("canvas");
+    originalCanvas.width = width;
+    originalCanvas.height = height;
+    originalCanvas.getContext("2d").drawImage(image, 0, 0, width, height);
+
+    state.cutout.file = file;
+    state.cutout.originalCanvas = originalCanvas;
+    state.cutout.history = [];
+    state.cutout.drawing = false;
+    state.cutout.lastPoint = null;
+    els.cutoutCanvas.width = width;
+    els.cutoutCanvas.height = height;
+    cutoutCtx.clearRect(0, 0, width, height);
+    cutoutCtx.drawImage(originalCanvas, 0, 0);
+    els.cutoutName.value = stripExtension(file.name);
+    if (!els.cutoutGroup.value.trim()) els.cutoutGroup.value = "未分组";
+    els.cutoutQueueStatus.textContent = `${state.cutout.index + 1} / ${Math.max(1, state.cutout.files.length)}`;
+    els.cutoutStatus.textContent = "自动抠图适合纯色或近似纯色背景；细节可用擦除和恢复调整。";
+    els.cutoutModal.hidden = false;
+    document.body.classList.add("modal-open");
+    setCutoutMode("wand");
+    updateCutoutLabels();
+    updateCutoutPreview();
+  } catch (error) {
+    showNotice(`Logo 读取失败：${error.message}`, false);
+    closeCutoutEditor();
+  }
+}
+
+function closeCutoutEditor() {
+  cutoutPreviewSequence += 1;
+  state.cutout.files = [];
+  state.cutout.file = null;
+  state.cutout.originalCanvas = null;
+  state.cutout.history = [];
+  state.cutout.drawing = false;
+  if (state.cutout.previewUrl) URL.revokeObjectURL(state.cutout.previewUrl);
+  state.cutout.previewUrl = null;
+  els.cutoutPreview.removeAttribute("src");
+  els.cutoutModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+function handleModalKeydown(event) {
+  if (event.key === "Escape" && !els.cutoutModal.hidden) closeCutoutEditor();
+}
+
+function setCutoutMode(mode) {
+  state.cutout.mode = mode;
+  els.cutoutModeButtons.forEach((button) => button.classList.toggle("active", button.dataset.cutoutMode === mode));
+  els.cutoutCanvas.style.cursor = "crosshair";
+}
+
+function updateCutoutLabels() {
+  els.cutoutToleranceValue.textContent = els.cutoutTolerance.value;
+  els.cutoutBrushValue.textContent = `${els.cutoutBrush.value} px`;
+}
+
+function pushCutoutHistory() {
+  if (!state.cutout.originalCanvas) return;
+  state.cutout.history.push(cutoutCtx.getImageData(0, 0, els.cutoutCanvas.width, els.cutoutCanvas.height));
+  if (state.cutout.history.length > 6) state.cutout.history.shift();
+  els.undoCutout.disabled = false;
+}
+
+function undoCutout() {
+  const snapshot = state.cutout.history.pop();
+  if (!snapshot) return;
+  cutoutCtx.putImageData(snapshot, 0, 0);
+  els.undoCutout.disabled = state.cutout.history.length === 0;
+  updateCutoutPreview();
+}
+
+function resetCutout() {
+  if (!state.cutout.originalCanvas) return;
+  pushCutoutHistory();
+  cutoutCtx.clearRect(0, 0, els.cutoutCanvas.width, els.cutoutCanvas.height);
+  cutoutCtx.drawImage(state.cutout.originalCanvas, 0, 0);
+  els.cutoutStatus.textContent = "已恢复原图。";
+  updateCutoutPreview();
+}
+
+function autoRemoveBackground() {
+  if (!state.cutout.originalCanvas || !window.MagicWand) return;
+  pushCutoutHistory();
+  cutoutCtx.clearRect(0, 0, els.cutoutCanvas.width, els.cutoutCanvas.height);
+  cutoutCtx.drawImage(state.cutout.originalCanvas, 0, 0);
+  const width = els.cutoutCanvas.width;
+  const height = els.cutoutCanvas.height;
+  const imageData = cutoutCtx.getImageData(0, 0, width, height);
+  const image = { data: imageData.data, width, height, bytes: 4 };
+  const inset = Math.max(0, Math.min(2, width - 1, height - 1));
+  const seeds = [[inset, inset], [width - 1 - inset, inset], [inset, height - 1 - inset], [width - 1 - inset, height - 1 - inset]];
+  const combined = new Uint8Array(width * height);
+  let removed = 0;
+  seeds.forEach(([x, y]) => {
+    const mask = window.MagicWand.floodFill(image, x, y, Number(els.cutoutTolerance.value), combined);
+    if (!mask) return;
+    for (let index = 0; index < combined.length; index += 1) {
+      if (mask.data[index] && !combined[index]) {
+        combined[index] = 1;
+        removed += 1;
+      }
+    }
+  });
+  for (let index = 0; index < combined.length; index += 1) {
+    if (combined[index]) imageData.data[index * 4 + 3] = 0;
+  }
+  cutoutCtx.putImageData(imageData, 0, 0);
+  const percent = Math.round(removed / combined.length * 100);
+  els.cutoutStatus.textContent = `已自动移除约 ${percent}% 的连通背景。可点选遗漏区域，或用笔刷继续调整。`;
+  updateCutoutPreview();
+}
+
+function startCutoutAction(event) {
+  if (!state.cutout.originalCanvas) return;
+  const point = cutoutPointer(event);
+  pushCutoutHistory();
+  if (state.cutout.mode === "wand") {
+    removeConnectedBackground(point);
+    return;
+  }
+  state.cutout.drawing = true;
+  state.cutout.lastPoint = point;
+  els.cutoutCanvas.setPointerCapture(event.pointerId);
+  paintCutoutStroke(point, point);
+}
+
+function moveCutoutAction(event) {
+  if (!state.cutout.drawing || !state.cutout.lastPoint) return;
+  const point = cutoutPointer(event);
+  paintCutoutStroke(state.cutout.lastPoint, point);
+  state.cutout.lastPoint = point;
+}
+
+function endCutoutAction(event) {
+  if (!state.cutout.drawing) return;
+  state.cutout.drawing = false;
+  state.cutout.lastPoint = null;
+  if (els.cutoutCanvas.hasPointerCapture(event.pointerId)) els.cutoutCanvas.releasePointerCapture(event.pointerId);
+  updateCutoutPreview();
+}
+
+function removeConnectedBackground(point) {
+  const width = els.cutoutCanvas.width;
+  const height = els.cutoutCanvas.height;
+  const imageData = cutoutCtx.getImageData(0, 0, width, height);
+  const x = clamp(Math.round(point.x), 0, width - 1);
+  const y = clamp(Math.round(point.y), 0, height - 1);
+  const mask = window.MagicWand?.floodFill({ data: imageData.data, width, height, bytes: 4 }, x, y, Number(els.cutoutTolerance.value));
+  if (!mask) return;
+  let removed = 0;
+  mask.data.forEach((selected, index) => {
+    if (!selected) return;
+    imageData.data[index * 4 + 3] = 0;
+    removed += 1;
+  });
+  cutoutCtx.putImageData(imageData, 0, 0);
+  els.cutoutStatus.textContent = removed ? "已移除点选的连通背景区域。" : "这个位置没有可移除的区域。";
+  updateCutoutPreview();
+}
+
+function paintCutoutStroke(from, to) {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  const radius = Number(els.cutoutBrush.value) / 2;
+  const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
+  for (let step = 0; step <= steps; step += 1) {
+    const progress = step / steps;
+    const x = from.x + (to.x - from.x) * progress;
+    const y = from.y + (to.y - from.y) * progress;
+    cutoutCtx.save();
+    cutoutCtx.beginPath();
+    cutoutCtx.arc(x, y, radius, 0, Math.PI * 2);
+    cutoutCtx.clip();
+    if (state.cutout.mode === "erase") {
+      cutoutCtx.clearRect(x - radius, y - radius, radius * 2, radius * 2);
+    } else {
+      cutoutCtx.drawImage(state.cutout.originalCanvas, 0, 0);
+    }
+    cutoutCtx.restore();
+  }
+}
+
+function cutoutPointer(event) {
+  const rect = els.cutoutCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * els.cutoutCanvas.width / rect.width,
+    y: (event.clientY - rect.top) * els.cutoutCanvas.height / rect.height,
+  };
+}
+
+let cutoutPreviewSequence = 0;
+async function updateCutoutPreview() {
+  const sequence = ++cutoutPreviewSequence;
+  const blob = await canvasToBlob(els.cutoutCanvas, "image/png");
+  if (sequence !== cutoutPreviewSequence) return;
+  if (state.cutout.previewUrl) URL.revokeObjectURL(state.cutout.previewUrl);
+  state.cutout.previewUrl = URL.createObjectURL(blob);
+  els.cutoutPreview.src = state.cutout.previewUrl;
+}
+
+async function saveCutoutLogo() {
+  if (!state.cutout.file) return;
+  els.saveCutout.disabled = true;
+  try {
+    const outputCanvas = els.trimTransparent.checked ? trimTransparentCanvas(els.cutoutCanvas) : cloneCanvas(els.cutoutCanvas);
+    const dataUrl = outputCanvas.toDataURL("image/png");
+    const img = await loadImageSource(dataUrl);
+    const logo = {
+      id: uid(),
+      name: els.cutoutName.value.trim() || stripExtension(state.cutout.file.name),
+      group: els.cutoutGroup.value.trim() || "未分组",
+      dataUrl,
+      img,
+    };
+    state.logos.push(logo);
+    state.focusedLogoId = logo.id;
+    state.selectedLogoIds.add(logo.id);
+    persistLogoLibrary();
+
+    state.cutout.index += 1;
+    if (state.cutout.index < state.cutout.files.length) {
+      await openCutoutFile(state.cutout.files[state.cutout.index]);
+    } else {
+      closeCutoutEditor();
+      renderLogoLibrary();
+      renderLogoEditor();
+      updateButtons();
+      showNotice("透明 Logo 已保存到 Logo 库并自动勾选。", true);
+    }
+  } catch (error) {
+    els.cutoutStatus.textContent = `保存失败：${error.message}`;
+  } finally {
+    els.saveCutout.disabled = false;
+  }
+}
+
+function trimTransparentCanvas(source) {
+  const ctx = source.getContext("2d", { willReadFrequently: true });
+  const { width, height } = source;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] < 3) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX || maxY < minY) throw new Error("画布已经完全透明，请恢复需要保留的 Logo。 ");
+  const padding = Math.max(2, Math.round(Math.max(width, height) * 0.005));
+  minX = Math.max(0, minX - padding);
+  minY = Math.max(0, minY - padding);
+  maxX = Math.min(width - 1, maxX + padding);
+  maxY = Math.min(height - 1, maxY + padding);
+  const canvas = document.createElement("canvas");
+  canvas.width = maxX - minX + 1;
+  canvas.height = maxY - minY + 1;
+  canvas.getContext("2d").drawImage(source, minX, minY, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function cloneCanvas(source) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  canvas.getContext("2d").drawImage(source, 0, 0);
+  return canvas;
 }
 
 function addImageToRatioGroup(image) {
@@ -117,6 +435,10 @@ function sortGroups() {
 function activateGroup(groupId) {
   state.activeGroupId = groupId;
   const group = getActiveGroup();
+  const preset = getActivePreset();
+  if (group && preset && (group.presetId !== preset.id || group.presetUpdatedAt !== preset.updatedAt)) {
+    applyPresetToGroup(preset.id, group);
+  }
   state.activeImageId = group?.imageIds[0] || null;
   state.selectedOverlayId = group?.overlays[0]?.id || null;
   syncControlsFromGroup();
@@ -141,14 +463,22 @@ function clearTasks() {
   renderAll();
 }
 
-function addSelectedLogoToJob() {
+function addSelectedLogosToJob() {
   const group = getActiveGroup();
-  const logo = getSelectedLogo();
-  if (!group || !logo) return;
-  const overlay = { id: uid(), logoId: logo.id, x: 0.76, y: 0.80, width: 0.18, opacity: 1 };
-  group.overlays.push(overlay);
-  state.selectedOverlayId = overlay.id;
-  placeSelectedOverlay("bottom-right");
+  const logos = state.logos.filter((logo) => state.selectedLogoIds.has(logo.id));
+  if (!group || !logos.length) return;
+  const existingIds = new Set(group.overlays.map((overlay) => overlay.logoId));
+  const added = logos.filter((logo) => !existingIds.has(logo.id)).map((logo, index) => ({
+    id: uid(),
+    logoId: logo.id,
+    x: 0.76,
+    y: Math.max(0.04, 0.80 - index * 0.11),
+    width: 0.18,
+    opacity: 1,
+  }));
+  group.overlays.push(...added);
+  added.forEach(clampOverlay);
+  state.selectedOverlayId = added.at(-1)?.id || group.overlays.at(-1)?.id || null;
   renderOverlayList();
   syncOverlayControls();
   renderPreview();
@@ -168,15 +498,20 @@ function removeSelectedOverlay() {
   updateButtons();
 }
 
-function deleteSelectedLogo() {
-  const logo = getSelectedLogo();
-  if (!logo) return;
-  state.logos = state.logos.filter((item) => item.id !== logo.id);
-  state.groups.forEach((group) => { group.overlays = group.overlays.filter((overlay) => overlay.logoId !== logo.id); });
-  state.selectedLogoId = state.logos[0]?.id || null;
+function deleteSelectedLogos() {
+  const ids = new Set(state.selectedLogoIds);
+  if (!ids.size) return;
+  state.logos = state.logos.filter((item) => !ids.has(item.id));
+  state.groups.forEach((group) => { group.overlays = group.overlays.filter((overlay) => !ids.has(overlay.logoId)); });
+  state.presets.forEach((preset) => { preset.overlays = preset.overlays.filter((overlay) => !ids.has(overlay.logoId)); });
+  state.presets = state.presets.filter((preset) => preset.overlays.length);
+  if (!state.presets.some((preset) => preset.id === state.activePresetId)) state.activePresetId = null;
+  state.selectedLogoIds.clear();
+  state.focusedLogoId = state.logos[0]?.id || null;
   const activeGroup = getActiveGroup();
   state.selectedOverlayId = activeGroup?.overlays[0]?.id || null;
   persistLogoLibrary();
+  persistPresets();
   renderAll();
 }
 
@@ -188,6 +523,74 @@ function updateLogoMeta(key, rawValue) {
   persistLogoLibrary();
   renderLogoLibrary();
   renderOverlayList();
+}
+
+function saveCurrentPreset() {
+  const group = getActiveGroup();
+  if (!group?.overlays.length) return;
+  const preset = {
+    id: uid(),
+    name: els.presetName.value.trim() || `Logo 组合 ${state.presets.length + 1}`,
+    overlays: serializeOverlays(group.overlays),
+    updatedAt: Date.now(),
+  };
+  state.presets.push(preset);
+  state.activePresetId = preset.id;
+  group.presetId = preset.id;
+  group.presetUpdatedAt = preset.updatedAt;
+  els.presetName.value = preset.name;
+  persistPresets();
+  renderPresetList();
+  updateButtons();
+  showNotice(`组合预设“${preset.name}”已保存，切换比例任务会继续套用。`, true);
+}
+
+function updateCurrentPreset() {
+  const group = getActiveGroup();
+  const preset = getActivePreset();
+  if (!group?.overlays.length || !preset) return;
+  preset.name = els.presetName.value.trim() || preset.name;
+  preset.overlays = serializeOverlays(group.overlays);
+  preset.updatedAt = Date.now();
+  group.presetId = preset.id;
+  group.presetUpdatedAt = preset.updatedAt;
+  persistPresets();
+  renderPresetList();
+  showNotice(`组合预设“${preset.name}”已更新。`, true);
+}
+
+function activatePreset(presetId) {
+  state.activePresetId = presetId;
+  const preset = getActivePreset();
+  if (preset) els.presetName.value = preset.name;
+  const group = getActiveGroup();
+  if (group) applyPresetToGroup(presetId, group);
+  persistPresets();
+  renderAll();
+}
+
+function applyPresetToGroup(presetId, group) {
+  const preset = state.presets.find((item) => item.id === presetId);
+  if (!preset) return;
+  group.overlays = preset.overlays
+    .filter((overlay) => getLogoById(overlay.logoId))
+    .map((overlay) => ({ ...overlay, id: uid() }));
+  group.overlays.forEach((overlay) => clampOverlayForGroup(overlay, group));
+  group.presetId = preset.id;
+  group.presetUpdatedAt = preset.updatedAt;
+  state.selectedOverlayId = group.overlays[0]?.id || null;
+}
+
+function deletePreset(presetId) {
+  state.presets = state.presets.filter((preset) => preset.id !== presetId);
+  if (state.activePresetId === presetId) state.activePresetId = null;
+  persistPresets();
+  renderPresetList();
+  updateButtons();
+}
+
+function serializeOverlays(overlays) {
+  return overlays.map(({ logoId, x, y, width, opacity }) => ({ logoId, x, y, width, opacity }));
 }
 
 function updateOverlayFromControls() {
@@ -307,6 +710,10 @@ function pointerToCanvas(event) {
 
 function clampOverlay(overlay) {
   const group = getActiveGroup();
+  clampOverlayForGroup(overlay, group);
+}
+
+function clampOverlayForGroup(overlay, group) {
   const logo = getLogoById(overlay.logoId);
   if (!group || !logo) return;
   const height = overlayHeightNormalized(overlay, logo, group.ratio);
@@ -321,6 +728,7 @@ function renderAll() {
   renderLogoLibrary();
   renderLogoEditor();
   renderOverlayList();
+  renderPresetList();
   syncControlsFromGroup();
   renderPreview();
   updateButtons();
@@ -371,7 +779,7 @@ function renderThumbs() {
 
 function renderLogoLibrary() {
   if (!state.logos.length) {
-    els.logoLibrary.innerHTML = '<p class="tool-empty">添加 Logo 后可视化选择，名称会自动保存。</p>';
+    els.logoLibrary.innerHTML = '<p class="tool-empty">添加图片后先抠图，再保存为透明 Logo。</p>';
     return;
   }
   els.logoLibrary.innerHTML = "";
@@ -383,10 +791,15 @@ function renderLogoLibrary() {
     els.logoLibrary.append(heading);
     logos.forEach((logo) => {
       const button = document.createElement("button");
-      button.className = `logo-card${logo.id === state.selectedLogoId ? " active" : ""}`;
-      button.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span>`;
+      const selected = state.selectedLogoIds.has(logo.id);
+      button.className = `logo-card${selected ? " active" : ""}${logo.id === state.focusedLogoId ? " focused" : ""}`;
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(selected));
+      button.innerHTML = `<span class="logo-check">✓</span><img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span>`;
       button.addEventListener("click", () => {
-        state.selectedLogoId = logo.id;
+        state.focusedLogoId = logo.id;
+        if (state.selectedLogoIds.has(logo.id)) state.selectedLogoIds.delete(logo.id);
+        else state.selectedLogoIds.add(logo.id);
         renderLogoLibrary();
         renderLogoEditor();
         updateButtons();
@@ -396,12 +809,43 @@ function renderLogoLibrary() {
   });
 }
 
+function renderPresetList() {
+  const active = getActivePreset();
+  els.activePresetStatus.textContent = active ? `已选：${active.name}` : "未选择";
+  if (!state.presets.length) {
+    els.presetList.innerHTML = '<p class="tool-empty">调好位置后保存，切换比例任务时仍可继续使用。</p>';
+    return;
+  }
+  els.presetList.innerHTML = "";
+  state.presets.forEach((preset) => {
+    const row = document.createElement("div");
+    row.className = "preset-row";
+    const choice = document.createElement("button");
+    choice.type = "button";
+    choice.className = `preset-choice${preset.id === state.activePresetId ? " active" : ""}`;
+    choice.textContent = `${preset.name} · ${preset.overlays.length} 个`;
+    choice.title = `将“${preset.name}”应用到当前比例任务`;
+    choice.addEventListener("click", () => activatePreset(preset.id));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "preset-delete";
+    remove.textContent = "×";
+    remove.title = `删除预设“${preset.name}”`;
+    remove.addEventListener("click", () => deletePreset(preset.id));
+    row.append(choice, remove);
+    els.presetList.append(row);
+  });
+}
+
 function renderLogoEditor() {
   const logo = getSelectedLogo();
   els.logoEditor.hidden = !logo;
   if (!logo) return;
   els.logoName.value = logo.name;
   els.logoGroup.value = logo.group;
+  const count = state.selectedLogoIds.size;
+  els.addLogoToJob.textContent = count ? `将已选 ${count} 个 Logo 加入组合` : "勾选要使用的 Logo";
+  els.deleteLogo.textContent = count > 1 ? `删除已选 ${count} 个` : "删除已选";
 }
 
 function renderOverlayList() {
@@ -593,7 +1037,7 @@ function setExporting(active, progress) {
   state.exporting = active;
   els.exportProgress.hidden = !active;
   els.exportProgressBar.style.width = `${Math.round(progress * 100)}%`;
-  els.downloadGroup.textContent = active ? `正在生成 ${Math.round(progress * 100)}%` : "导出当前比例组 ZIP";
+  els.downloadGroup.textContent = active ? `正在高清压缩 ${Math.round(progress * 100)}%` : "高清压缩并导出当前组 ZIP";
   updateButtons();
 }
 
@@ -601,7 +1045,10 @@ function updateButtons() {
   const hasGroup = Boolean(getActiveGroup());
   const hasImage = Boolean(getActiveImage());
   els.clearAll.disabled = state.images.length === 0;
-  els.addLogoToJob.disabled = !hasGroup || !getSelectedLogo();
+  els.addLogoToJob.disabled = !hasGroup || state.selectedLogoIds.size === 0;
+  els.deleteLogo.disabled = state.selectedLogoIds.size === 0;
+  els.savePreset.disabled = !getActiveGroup()?.overlays.length;
+  els.updatePreset.disabled = !getActivePreset() || !getActiveGroup()?.overlays.length;
   els.downloadCurrent.disabled = !hasImage || state.exporting;
   els.downloadGroup.disabled = !hasGroup || state.exporting;
 }
@@ -620,9 +1067,21 @@ function restoreLogoLibrary() {
       img.src = item.dataUrl;
       state.logos.push({ ...item, img });
     });
-    state.selectedLogoId = state.logos[0]?.id || null;
+    state.focusedLogoId = state.logos[0]?.id || null;
   } catch (error) {
     localStorage.removeItem(LOGO_STORAGE_KEY);
+  }
+}
+
+function restorePresets() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PRESET_STORAGE_KEY) || "{}");
+    state.presets = Array.isArray(saved.presets) ? saved.presets : [];
+    state.activePresetId = state.presets.some((preset) => preset.id === saved.activePresetId) ? saved.activePresetId : null;
+    const active = getActivePreset();
+    if (active) els.presetName.value = active.name;
+  } catch (error) {
+    localStorage.removeItem(PRESET_STORAGE_KEY);
   }
 }
 
@@ -632,6 +1091,14 @@ function persistLogoLibrary() {
     localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(serializable));
   } catch (error) {
     showNotice("Logo 库已载入，但浏览器存储空间不足，刷新后可能不会保留。", false);
+  }
+}
+
+function persistPresets() {
+  try {
+    localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify({ presets: state.presets, activePresetId: state.activePresetId }));
+  } catch (error) {
+    showNotice("组合预设暂时无法保存到浏览器。", false);
   }
 }
 
@@ -672,9 +1139,10 @@ function fileToDataUrl(file) {
 function getActiveGroup() { return state.groups.find((group) => group.id === state.activeGroupId) || null; }
 function getActiveImage() { return getImageById(state.activeImageId); }
 function getImageById(id) { return state.images.find((image) => image.id === id) || null; }
-function getSelectedLogo() { return getLogoById(state.selectedLogoId); }
+function getSelectedLogo() { return getLogoById(state.focusedLogoId); }
 function getLogoById(id) { return state.logos.find((logo) => logo.id === id) || null; }
 function getSelectedOverlay() { return getActiveGroup()?.overlays.find((overlay) => overlay.id === state.selectedOverlayId) || null; }
+function getActivePreset() { return state.presets.find((preset) => preset.id === state.activePresetId) || null; }
 
 function overlayRect(overlay, imageWidth, imageHeight) {
   const logo = getLogoById(overlay.logoId);

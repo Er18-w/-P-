@@ -86,14 +86,14 @@
           </div>
           <input id="logoInput" type="file" accept="image/png,image/webp,image/jpeg" multiple />
           <div id="logoLibrary" class="logo-library">
-            <p class="tool-empty">添加 Logo 后可视化选择，名称会自动保存。</p>
+            <p class="tool-empty">添加图片后先抠图，再保存为透明 Logo。</p>
           </div>
           <div id="logoEditor" class="logo-editor" hidden>
             <label>名称<input id="logoName" type="text" placeholder="白色横排" /></label>
             <label>品牌组<input id="logoGroup" type="text" placeholder="主品牌" /></label>
             <div class="inline-actions">
-              <button id="addLogoToJob" class="primary-button" disabled>添加到当前任务</button>
-              <button id="deleteLogo" class="danger-button" title="从 Logo 库删除">删除</button>
+              <button id="addLogoToJob" class="primary-button" disabled>将已选 Logo 加入组合</button>
+              <button id="deleteLogo" class="danger-button" title="从 Logo 库和所有组合中删除">删除已选</button>
             </div>
           </div>
         </section>
@@ -108,6 +108,20 @@
           </div>
           <div id="overlayList" class="overlay-list">
             <p class="tool-empty">从 Logo 库一键添加，可叠加多个 Logo。</p>
+          </div>
+          <div class="preset-panel">
+            <div class="preset-heading">
+              <strong>组合预设</strong>
+              <span id="activePresetStatus">未选择</span>
+            </div>
+            <div id="presetList" class="preset-list">
+              <p class="tool-empty">调好位置后保存，切换比例任务时仍可继续使用。</p>
+            </div>
+            <label class="compact-field">预设名称<input id="presetName" type="text" placeholder="主品牌双 Logo" /></label>
+            <div class="preset-actions">
+              <button id="savePreset" class="secondary-button" disabled>保存为新预设</button>
+              <button id="updatePreset" class="quiet-button" disabled>更新当前预设</button>
+            </div>
           </div>
           <div id="placementControls" hidden>
             <div class="position-grid" role="group" aria-label="Logo 快速位置">
@@ -149,13 +163,67 @@
             <label>最长边<select id="maxEdge"><option value="0">保持原尺寸</option><option value="4096">4096 px</option><option value="2560">2560 px</option><option value="1920">1920 px</option></select></label>
           </div>
           <label class="range-field"><span>压缩质量 <output id="qualityValue">92%</output></span><input id="quality" type="range" min="55" max="100" value="92" /></label>
+          <p class="export-note">逐张按原像素或指定最长边重新编码，再打包为可下载 ZIP。</p>
           <div id="exportProgress" class="export-progress" hidden><div id="exportProgressBar"></div></div>
           <button id="downloadCurrent" class="secondary-button" disabled>下载当前预览</button>
-          <button id="downloadGroup" class="primary-button export-button" disabled>导出当前比例组 ZIP</button>
+          <button id="downloadGroup" class="primary-button export-button" disabled>高清压缩并导出当前组 ZIP</button>
         </section>
       </aside>
     </main>
 
+    <div id="cutoutModal" class="modal-backdrop" hidden>
+      <section class="cutout-dialog" role="dialog" aria-modal="true" aria-labelledby="cutoutTitle">
+        <header class="cutout-header">
+          <div>
+            <span class="eyebrow">添加到 Logo 库</span>
+            <h2 id="cutoutTitle">抠出透明 Logo</h2>
+          </div>
+          <button id="closeCutout" class="icon-button modal-close" type="button" title="关闭">×</button>
+        </header>
+
+        <div class="cutout-body">
+          <div class="cutout-workspace">
+            <div class="cutout-toolbar">
+              <button id="autoCutout" class="primary-button" type="button">自动去背景</button>
+              <div class="mode-control" role="group" aria-label="手动抠图工具">
+                <button class="active" data-cutout-mode="wand" type="button">点选背景</button>
+                <button data-cutout-mode="erase" type="button">擦除</button>
+                <button data-cutout-mode="restore" type="button">恢复</button>
+              </div>
+              <button id="undoCutout" class="icon-button" type="button" title="撤销" disabled>↶</button>
+              <button id="resetCutout" class="quiet-button" type="button">重置</button>
+            </div>
+
+            <div id="cutoutStage" class="cutout-stage">
+              <canvas id="cutoutCanvas" width="800" height="500" aria-label="Logo 抠图画布"></canvas>
+            </div>
+
+            <div class="cutout-sliders">
+              <label class="range-field"><span>颜色容差 <output id="cutoutToleranceValue">32</output></span><input id="cutoutTolerance" type="range" min="2" max="100" value="32" /></label>
+              <label class="range-field"><span>笔刷大小 <output id="cutoutBrushValue">36 px</output></span><input id="cutoutBrush" type="range" min="4" max="160" value="36" /></label>
+            </div>
+          </div>
+
+          <aside class="cutout-details">
+            <div class="cutout-result-preview"><img id="cutoutPreview" alt="透明 Logo 预览" /></div>
+            <label>名称<input id="cutoutName" type="text" placeholder="白色横排" /></label>
+            <label>品牌组<input id="cutoutGroup" type="text" placeholder="主品牌" value="未分组" /></label>
+            <label class="check-field"><input id="trimTransparent" type="checkbox" checked /> 自动裁掉透明空白</label>
+            <p id="cutoutStatus" class="cutout-status">自动抠图适合纯色或近似纯色背景；细节可用擦除和恢复调整。</p>
+          </aside>
+        </div>
+
+        <footer class="cutout-footer">
+          <span id="cutoutQueueStatus">1 / 1</span>
+          <div>
+            <button id="cancelCutout" class="quiet-button" type="button">取消</button>
+            <button id="saveCutout" class="primary-button" type="button">保存到 Logo 库</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <script src="./third-party/magic-wand.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
