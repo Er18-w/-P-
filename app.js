@@ -996,8 +996,9 @@ function renderPreview() {
 function fitPreviewCanvas() {
   const stage = els.previewCanvas.parentElement;
   if (!stage || !getActiveImage()) return;
-  const maxWidth = Math.max(180, stage.clientWidth - 40);
-  const maxHeight = Math.max(220, stage.clientHeight - 40);
+  const workspace = stage.closest(".workspace");
+  const maxWidth = Math.max(180, (workspace?.clientWidth || stage.clientWidth) - 40);
+  const maxHeight = Math.max(220, stage.getBoundingClientRect().height - 40);
   const scale = Math.min(maxWidth / els.previewCanvas.width, maxHeight / els.previewCanvas.height, 1);
   els.previewCanvas.style.width = `${Math.round(els.previewCanvas.width * scale)}px`;
   els.previewCanvas.style.height = `${Math.round(els.previewCanvas.height * scale)}px`;
@@ -1007,14 +1008,36 @@ function drawBaseImage(image, group, canvas, ctx, targetDimensions = null) {
   const dimensions = targetDimensions || previewDimensions(image.width, image.height);
   canvas.width = dimensions.width;
   canvas.height = dimensions.height;
-  ctx.save();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.filter = adjustmentFilter(group.adjustments);
   ctx.drawImage(image.img, 0, 0, canvas.width, canvas.height);
-  ctx.restore();
+  applyPixelAdjustments(ctx, canvas.width, canvas.height, group.adjustments);
   applyFaceBeauty(canvas, ctx, image.faces || [], group.adjustments);
+}
+
+function applyPixelAdjustments(ctx, width, height, adjustments) {
+  const brightness = Number(adjustments.brightness || 0) / 100;
+  const contrast = 1 + Number(adjustments.contrast || 0) / 100;
+  const saturation = 1 + Number(adjustments.saturation || 0) / 100;
+  if (!brightness && contrast === 1 && saturation === 1) return;
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const pixels = imageData.data;
+  const brightnessFactor = 1 + brightness;
+  for (let index = 0; index < pixels.length; index += 4) {
+    let r = (pixels[index] * brightnessFactor - 128) * contrast + 128;
+    let g = (pixels[index + 1] * brightnessFactor - 128) * contrast + 128;
+    let b = (pixels[index + 2] * brightnessFactor - 128) * contrast + 128;
+    const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    r = luminance + (r - luminance) * saturation;
+    g = luminance + (g - luminance) * saturation;
+    b = luminance + (b - luminance) * saturation;
+    pixels[index] = clamp(Math.round(r), 0, 255);
+    pixels[index + 1] = clamp(Math.round(g), 0, 255);
+    pixels[index + 2] = clamp(Math.round(b), 0, 255);
+  }
+  ctx.putImageData(imageData, 0, 0);
 }
 
 function ensureFaceDetection(image) {
@@ -1027,7 +1050,7 @@ function ensureFaceDetection(image) {
         resolve(image.faces);
         return;
       }
-      const maxSide = 640;
+      const maxSide = 960;
       const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(image.width * scale));
@@ -1036,10 +1059,10 @@ function ensureFaceDetection(image) {
       ctx.drawImage(image.img, 0, 0, canvas.width, canvas.height);
       const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
       const tracker = new window.tracking.ObjectTracker("face");
-      tracker.setInitialScale(2.5);
-      tracker.setScaleFactor(1.25);
-      tracker.setStepSize(1.7);
-      tracker.setEdgesDensity(0.1);
+      tracker.setInitialScale(1.5);
+      tracker.setScaleFactor(1.2);
+      tracker.setStepSize(1.3);
+      tracker.setEdgesDensity(0.08);
       let faces = [];
       tracker.on("track", (event) => { faces = event.data || []; });
       tracker.track(pixels, canvas.width, canvas.height);
@@ -1374,10 +1397,6 @@ function exportDimensions(width, height, maxEdge) {
   if (!maxEdge || Math.max(width, height) <= maxEdge) return { width, height };
   const scale = maxEdge / Math.max(width, height);
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
-}
-
-function adjustmentFilter(adjustments) {
-  return `brightness(${100 + adjustments.brightness}%) contrast(${100 + adjustments.contrast}%) saturate(${100 + adjustments.saturation}%)`;
 }
 
 function ratioLabel(ratio) {

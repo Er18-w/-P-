@@ -83,23 +83,23 @@ h2 { font-size: 15px; line-height: 1.25; }
 .sidebar-empty { padding: 18px 8px; text-align: center; }
 
 .workspace { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
-.workspace-toolbar { min-height: 64px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: white; }
+.workspace-toolbar { grid-row: 1; min-height: 64px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: white; }
 .preview-meta { display: grid; justify-items: end; gap: 3px; min-width: 0; }
 .preview-meta strong, .preview-meta span { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-meta strong { font-size: 12px; }
 .preview-meta span { color: var(--muted); font-size: 11px; }
 
-.notice { margin: 10px 14px 0; padding: 9px 11px; border: 1px solid #f0b7b2; border-radius: 6px; background: #fff4f2; color: var(--danger); font-size: 12px; }
+.notice { grid-row: 2; margin: 10px 14px 0; padding: 9px 11px; border: 1px solid #f0b7b2; border-radius: 6px; background: #fff4f2; color: var(--danger); font-size: 12px; }
 .notice.success { border-color: #a6d6cc; background: #eefaf7; color: var(--accent-strong); }
 
-.preview-stage { position: relative; display: grid; min-height: 0; padding: 20px; overflow: hidden; place-items: center; background: var(--canvas-bg); }
+.preview-stage { position: relative; grid-row: 3; display: grid; min-height: 0; padding: 20px; overflow: hidden; place-items: center; background: var(--canvas-bg); }
 #previewCanvas { display: block; width: auto; height: auto; max-width: none; max-height: none; border-radius: 4px; background: white; box-shadow: var(--shadow); cursor: default; touch-action: none; }
 #previewCanvas.can-drag { cursor: grab; }
 #previewCanvas.dragging { cursor: grabbing; }
 .empty-state { position: absolute; inset: 20px; display: grid; place-content: center; gap: 6px; border: 1px dashed #b2bdcc; border-radius: 7px; background: rgba(248, 250, 252, 0.92); color: var(--ink); text-align: center; }
 .empty-state span { color: var(--muted); font-size: 12px; }
 .empty-state.hidden { display: none; }
-.filmstrip-wrap { border-top: 1px solid var(--line); background: white; }
+.filmstrip-wrap { grid-row: 4; border-top: 1px solid var(--line); background: white; }
 .filmstrip-heading { padding: 9px 16px 0; font-size: 12px; }
 .filmstrip-heading > div { display: flex; align-items: center; gap: 8px; }
 .filmstrip-heading span { color: var(--muted); }
