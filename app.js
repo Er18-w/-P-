@@ -7,6 +7,7 @@ const state = {
   groups: [],
   logos: [],
   presets: [],
+  selectedImageIds: new Set(),
   activeGroupId: null,
   activeImageId: null,
   focusedLogoId: null,
@@ -31,14 +32,16 @@ const state = {
 const elementIds = [
   "imageInput", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
   "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
+  "selectCurrentGroup", "clearCurrentGroup",
   "previewCanvas", "emptyState", "notice", "logoLibrary", "logoEditor",
   "logoName", "logoGroup", "addLogoToJob", "deleteLogo", "overlayCount", "overlayList",
   "presetList", "presetName", "savePreset", "updatePreset", "activePresetStatus",
   "placementControls", "autoPlace", "logoSize", "logoSizeValue", "logoOpacity",
   "logoOpacityValue", "removeOverlay", "brightness", "brightnessValue", "contrast",
-  "contrastValue", "saturation", "saturationValue", "resetAdjustments", "format", "maxEdge",
+  "contrastValue", "saturation", "saturationValue", "smoothing", "smoothingValue",
+  "skinBrightening", "skinBrighteningValue", "beautyStatus", "resetAdjustments", "format", "maxEdge",
   "quality", "qualityValue", "downloadCurrent", "downloadGroup", "exportProgress",
-  "exportProgressBar",
+  "exportProgressBar", "selectedImageCount", "selectAllImages", "clearImageSelection",
   "cutoutModal", "closeCutout", "cancelCutout", "saveCutout", "autoCutout",
   "undoCutout", "resetCutout", "cutoutStage", "cutoutCanvas", "cutoutPreview",
   "cutoutTolerance", "cutoutToleranceValue", "cutoutBrush", "cutoutBrushValue",
@@ -74,8 +77,12 @@ function bindEvents() {
   els.positionButtons.forEach((button) => button.addEventListener("click", () => placeSelectedOverlay(button.dataset.position)));
 
   [els.logoSize, els.logoOpacity].forEach((input) => input.addEventListener("input", updateOverlayFromControls));
-  [els.brightness, els.contrast, els.saturation].forEach((input) => input.addEventListener("input", updateGroupAdjustments));
+  [els.brightness, els.contrast, els.saturation, els.smoothing, els.skinBrightening].forEach((input) => input.addEventListener("input", updateGroupAdjustments));
   els.resetAdjustments.addEventListener("click", resetGroupAdjustments);
+  els.selectCurrentGroup.addEventListener("click", () => selectGroupImages(true));
+  els.clearCurrentGroup.addEventListener("click", () => selectGroupImages(false));
+  els.selectAllImages.addEventListener("click", selectAllImages);
+  els.clearImageSelection.addEventListener("click", clearImageSelection);
   els.quality.addEventListener("input", updateControlLabels);
   els.downloadCurrent.addEventListener("click", downloadCurrentImage);
   els.downloadGroup.addEventListener("click", downloadActiveGroup);
@@ -109,7 +116,10 @@ async function handleImageUpload(event) {
   const results = await Promise.allSettled(files.map(loadImageFile));
   const loaded = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
   const failed = results.length - loaded.length;
-  loaded.forEach(addImageToRatioGroup);
+  loaded.forEach((image) => {
+    addImageToRatioGroup(image);
+    state.selectedImageIds.add(image.id);
+  });
   if (!state.activeGroupId && state.groups[0]) activateGroup(state.groups[0].id);
   renderAll();
   showNotice(failed ? `已添加 ${loaded.length} 张，${failed} 张读取失败。` : `已自动分成 ${state.groups.length} 个比例任务。`, failed === 0);
@@ -418,7 +428,7 @@ function addImageToRatioGroup(image) {
       label: ratioLabel(ratio),
       imageIds: [],
       overlays: [],
-      adjustments: { brightness: 0, contrast: 0, saturation: 0 },
+      adjustments: { brightness: 0, contrast: 0, saturation: 0, smoothing: 0, skinBrightening: 0 },
     };
     state.groups.push(group);
     sortGroups();
@@ -452,10 +462,46 @@ function activateImage(imageId) {
   renderWorkspaceHeader();
 }
 
+function toggleImageSelection(imageId, selected) {
+  if (selected) state.selectedImageIds.add(imageId);
+  else state.selectedImageIds.delete(imageId);
+  renderThumbs();
+  renderGroupList();
+  updateButtons();
+  updateGlobalStatus();
+}
+
+function selectGroupImages(selected) {
+  const group = getActiveGroup();
+  if (!group) return;
+  group.imageIds.forEach((id) => selected ? state.selectedImageIds.add(id) : state.selectedImageIds.delete(id));
+  renderThumbs();
+  renderGroupList();
+  updateButtons();
+  updateGlobalStatus();
+}
+
+function selectAllImages() {
+  state.images.forEach((image) => state.selectedImageIds.add(image.id));
+  renderThumbs();
+  renderGroupList();
+  updateButtons();
+  updateGlobalStatus();
+}
+
+function clearImageSelection() {
+  state.selectedImageIds.clear();
+  renderThumbs();
+  renderGroupList();
+  updateButtons();
+  updateGlobalStatus();
+}
+
 function clearTasks() {
   state.images.forEach((image) => URL.revokeObjectURL(image.url));
   state.images = [];
   state.groups = [];
+  state.selectedImageIds.clear();
   state.activeGroupId = null;
   state.activeImageId = null;
   state.selectedOverlayId = null;
@@ -610,6 +656,8 @@ function updateGroupAdjustments() {
   group.adjustments.brightness = Number(els.brightness.value);
   group.adjustments.contrast = Number(els.contrast.value);
   group.adjustments.saturation = Number(els.saturation.value);
+  group.adjustments.smoothing = Number(els.smoothing.value);
+  group.adjustments.skinBrightening = Number(els.skinBrightening.value);
   updateControlLabels();
   renderPreview();
 }
@@ -617,7 +665,7 @@ function updateGroupAdjustments() {
 function resetGroupAdjustments() {
   const group = getActiveGroup();
   if (!group) return;
-  group.adjustments = { brightness: 0, contrast: 0, saturation: 0 };
+  group.adjustments = { brightness: 0, contrast: 0, saturation: 0, smoothing: 0, skinBrightening: 0 };
   syncControlsFromGroup();
   renderPreview();
 }
@@ -743,10 +791,11 @@ function renderGroupList() {
   els.groupList.innerHTML = "";
   state.groups.forEach((group, index) => {
     const dimensions = group.imageIds.map((id) => getImageById(id)).filter(Boolean);
+    const selectedCount = group.imageIds.filter((id) => state.selectedImageIds.has(id)).length;
     const samples = [...new Set(dimensions.map((image) => `${image.width}×${image.height}`))].slice(0, 2).join("、");
     const button = document.createElement("button");
     button.className = `group-card${group.id === state.activeGroupId ? " active" : ""}`;
-    button.innerHTML = `<div class="group-card-top"><strong>任务 ${index + 1}</strong><span>${group.imageIds.length} 张</span></div><div class="group-card-ratio">${escapeHtml(group.label)}</div><div class="group-card-bottom"><span>${escapeHtml(samples)}</span><span class="${group.overlays.length ? "group-ready" : ""}">${group.overlays.length ? `${group.overlays.length} 个 Logo` : "待设置"}</span></div>`;
+    button.innerHTML = `<div class="group-card-top"><strong>任务 ${index + 1}</strong><span>${selectedCount}/${group.imageIds.length} 已选</span></div><div class="group-card-ratio">${escapeHtml(group.label)}</div><div class="group-card-bottom"><span>${escapeHtml(samples)}</span><span class="${group.overlays.length ? "group-ready" : ""}">${group.overlays.length ? `${group.overlays.length} 个 Logo` : "待设置"}</span></div>`;
     button.addEventListener("click", () => activateGroup(group.id));
     els.groupList.append(button);
   });
@@ -769,11 +818,21 @@ function renderThumbs() {
   group.imageIds.forEach((imageId) => {
     const image = getImageById(imageId);
     if (!image) return;
-    const button = document.createElement("button");
-    button.className = `thumb${image.id === state.activeImageId ? " active" : ""}`;
-    button.innerHTML = `<img src="${image.url}" alt=""><span>${escapeHtml(image.file.name)}</span>`;
-    button.addEventListener("click", () => activateImage(image.id));
-    els.thumbs.append(button);
+    const selected = state.selectedImageIds.has(image.id);
+    const item = document.createElement("div");
+    item.className = `thumb${image.id === state.activeImageId ? " active" : ""}${selected ? " selected" : ""}`;
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "thumb-preview";
+    preview.innerHTML = `<img src="${image.url}" alt=""><span>${escapeHtml(image.file.name)}</span>`;
+    preview.addEventListener("click", () => activateImage(image.id));
+    const selector = document.createElement("label");
+    selector.className = "thumb-select";
+    selector.title = selected ? "取消导出这张图片" : "选择导出这张图片";
+    selector.innerHTML = `<input type="checkbox" ${selected ? "checked" : ""} aria-label="选择 ${escapeHtml(image.file.name)}">✓`;
+    selector.querySelector("input").addEventListener("change", (event) => toggleImageSelection(image.id, event.target.checked));
+    item.append(preview, selector);
+    els.thumbs.append(item);
   });
 }
 
@@ -875,10 +934,12 @@ function renderOverlayList() {
 
 function syncControlsFromGroup() {
   const group = getActiveGroup();
-  const adjustments = group?.adjustments || { brightness: 0, contrast: 0, saturation: 0 };
+  const adjustments = group?.adjustments || { brightness: 0, contrast: 0, saturation: 0, smoothing: 0, skinBrightening: 0 };
   els.brightness.value = adjustments.brightness;
   els.contrast.value = adjustments.contrast;
   els.saturation.value = adjustments.saturation;
+  els.smoothing.value = adjustments.smoothing || 0;
+  els.skinBrightening.value = adjustments.skinBrightening || 0;
   syncOverlayControls();
   updateControlLabels();
 }
@@ -898,6 +959,8 @@ function updateControlLabels() {
   els.brightnessValue.textContent = signedValue(els.brightness.value);
   els.contrastValue.textContent = signedValue(els.contrast.value);
   els.saturationValue.textContent = signedValue(els.saturation.value);
+  els.smoothingValue.textContent = `${els.smoothing.value}%`;
+  els.skinBrighteningValue.textContent = `${els.skinBrightening.value}%`;
   els.qualityValue.textContent = `${els.quality.value}%`;
 }
 
@@ -913,6 +976,17 @@ function renderPreview() {
     return;
   }
   els.emptyState.classList.add("hidden");
+  const beautyEnabled = (group.adjustments.smoothing || group.adjustments.skinBrightening) > 0;
+  if (beautyEnabled && !Array.isArray(image.faces)) {
+    els.beautyStatus.textContent = "正在识别人脸…";
+    ensureFaceDetection(image).then(() => {
+      if (state.activeImageId === image.id) renderPreview();
+    });
+  } else if (beautyEnabled) {
+    els.beautyStatus.textContent = image.faces.length ? `当前图检测到 ${image.faces.length} 张脸` : "当前图未检测到正面人脸";
+  } else {
+    els.beautyStatus.textContent = "开启后自动识别人脸";
+  }
   drawBaseImage(image, group, els.previewCanvas, previewCtx);
   drawOverlays(previewCtx, els.previewCanvas.width, els.previewCanvas.height, group, true);
   fitPreviewCanvas();
@@ -940,6 +1014,130 @@ function drawBaseImage(image, group, canvas, ctx, targetDimensions = null) {
   ctx.filter = adjustmentFilter(group.adjustments);
   ctx.drawImage(image.img, 0, 0, canvas.width, canvas.height);
   ctx.restore();
+  applyFaceBeauty(canvas, ctx, image.faces || [], group.adjustments);
+}
+
+function ensureFaceDetection(image) {
+  if (Array.isArray(image.faces)) return Promise.resolve(image.faces);
+  if (image.faceDetectionPromise) return image.faceDetectionPromise;
+  image.faceDetectionPromise = new Promise((resolve) => {
+    try {
+      if (!window.tracking?.ObjectTracker || !window.tracking?.ViolaJones?.classifiers?.face) {
+        image.faces = [];
+        resolve(image.faces);
+        return;
+      }
+      const maxSide = 640;
+      const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(image.img, 0, 0, canvas.width, canvas.height);
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const tracker = new window.tracking.ObjectTracker("face");
+      tracker.setInitialScale(2.5);
+      tracker.setScaleFactor(1.25);
+      tracker.setStepSize(1.7);
+      tracker.setEdgesDensity(0.1);
+      let faces = [];
+      tracker.on("track", (event) => { faces = event.data || []; });
+      tracker.track(pixels, canvas.width, canvas.height);
+      image.faces = faces.map((face) => ({
+        x: face.x / canvas.width,
+        y: face.y / canvas.height,
+        width: face.width / canvas.width,
+        height: face.height / canvas.height,
+      }));
+      canvas.width = 1;
+      canvas.height = 1;
+      resolve(image.faces);
+    } catch (error) {
+      image.faces = [];
+      resolve(image.faces);
+    }
+  });
+  return image.faceDetectionPromise;
+}
+
+function applyFaceBeauty(canvas, ctx, faces, adjustments) {
+  const smoothing = Number(adjustments.smoothing || 0);
+  const brightening = Number(adjustments.skinBrightening || 0);
+  if ((!smoothing && !brightening) || !faces.length || !window.StackBlur?.canvasRGBA) return;
+  faces.forEach((face) => applyBeautyToFace(canvas, ctx, face, smoothing, brightening));
+}
+
+function applyBeautyToFace(canvas, ctx, face, smoothing, brightening) {
+  const sourceX = clamp(Math.round((face.x - face.width * 0.10) * canvas.width), 0, canvas.width - 1);
+  const sourceY = clamp(Math.round((face.y - face.height * 0.08) * canvas.height), 0, canvas.height - 1);
+  const sourceWidth = Math.min(canvas.width - sourceX, Math.max(1, Math.round(face.width * 1.20 * canvas.width)));
+  const sourceHeight = Math.min(canvas.height - sourceY, Math.max(1, Math.round(face.height * 1.28 * canvas.height)));
+  const workScale = Math.min(1, 800 / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * workScale));
+  const height = Math.max(1, Math.round(sourceHeight * workScale));
+  const original = document.createElement("canvas");
+  original.width = width;
+  original.height = height;
+  const originalCtx = original.getContext("2d", { willReadFrequently: true });
+  originalCtx.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
+
+  const softened = document.createElement("canvas");
+  softened.width = width;
+  softened.height = height;
+  const softenedCtx = softened.getContext("2d", { willReadFrequently: true });
+  softenedCtx.drawImage(original, 0, 0);
+  if (smoothing) {
+    const radius = clamp(Math.round(Math.min(width, height) * (0.008 + smoothing * 0.00012)), 2, 18);
+    window.StackBlur.canvasRGBA(softened, 0, 0, width, height, radius);
+  }
+
+  const sourceData = originalCtx.getImageData(0, 0, width, height);
+  const resultData = softenedCtx.getImageData(0, 0, width, height);
+  const sourcePixels = sourceData.data;
+  const resultPixels = resultData.data;
+  const smoothStrength = smoothing / 100 * 0.72;
+  const brightenStrength = brightening / 60 * 0.16;
+  for (let y = 0; y < height; y += 1) {
+    const normalizedY = (y / height - 0.48) / 0.52;
+    for (let x = 0; x < width; x += 1) {
+      const normalizedX = (x / width - 0.50) / 0.48;
+      const distance = normalizedX * normalizedX + normalizedY * normalizedY;
+      if (distance >= 1) continue;
+      const index = (y * width + x) * 4;
+      const r = sourcePixels[index];
+      const g = sourcePixels[index + 1];
+      const b = sourcePixels[index + 2];
+      if (!isLikelySkin(r, g, b)) {
+        resultPixels[index] = r;
+        resultPixels[index + 1] = g;
+        resultPixels[index + 2] = b;
+        continue;
+      }
+      const feather = clamp((1 - distance) * 2.5, 0, 1);
+      const blend = smoothStrength * feather;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const originalValue = sourcePixels[index + channel];
+        const smoothValue = resultPixels[index + channel];
+        let value = originalValue + (smoothValue - originalValue) * blend;
+        value += (255 - value) * brightenStrength * feather;
+        resultPixels[index + channel] = clamp(Math.round(value), 0, 255);
+      }
+    }
+  }
+  softenedCtx.putImageData(resultData, 0, 0);
+  ctx.drawImage(softened, 0, 0, width, height, sourceX, sourceY, sourceWidth, sourceHeight);
+  original.width = 1;
+  original.height = 1;
+  softened.width = 1;
+  softened.height = 1;
+}
+
+function isLikelySkin(r, g, b) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const cb = 128 - 0.169 * r - 0.331 * g + 0.5 * b;
+  const cr = 128 + 0.5 * r - 0.419 * g - 0.081 * b;
+  return r > 45 && g > 28 && b > 15 && max - min > 10 && r > g * 0.88 && r > b * 1.04 && cb > 70 && cb < 145 && cr > 125 && cr < 190;
 }
 
 function drawOverlays(ctx, width, height, group, showSelection) {
@@ -992,26 +1190,31 @@ async function downloadCurrentImage() {
 }
 
 async function downloadActiveGroup() {
-  const group = getActiveGroup();
-  if (!group || state.exporting) return;
-  const images = group.imageIds.map(getImageById).filter(Boolean);
+  if (state.exporting) return;
+  const images = state.images.filter((image) => state.selectedImageIds.has(image.id));
   if (!images.length) return;
   const entries = [];
+  const groupCounters = new Map();
   try {
     setExporting(true, 0);
     for (let index = 0; index < images.length; index += 1) {
       const image = images[index];
+      const group = state.groups.find((item) => item.id === image.groupId);
+      if (!group) continue;
       const blob = await renderImageBlob(image, group);
       if (!blob?.size) throw new Error(`${image.file.name} 未生成有效图片`);
-      entries.push({ name: `${String(index + 1).padStart(3, "0")}-${outputName(image.file.name)}`, bytes: new Uint8Array(await blob.arrayBuffer()) });
+      const groupIndex = state.groups.findIndex((item) => item.id === group.id) + 1;
+      const count = (groupCounters.get(group.id) || 0) + 1;
+      groupCounters.set(group.id, count);
+      const folder = `任务${String(groupIndex).padStart(2, "0")}-${safeFilePart(group.label)}`;
+      entries.push({ name: `${folder}/${String(count).padStart(3, "0")}-${outputName(image.file.name)}`, bytes: new Uint8Array(await blob.arrayBuffer()) });
       setExporting(true, (index + 1) / images.length);
       await yieldToBrowser();
     }
     const zip = createStoredZip(entries);
     if (!zip.size) throw new Error("ZIP 文件为空");
-    const groupIndex = state.groups.findIndex((item) => item.id === group.id) + 1;
-    triggerDownload(zip, `任务${groupIndex}-${safeFilePart(group.label)}-${images.length}张.zip`);
-    showNotice(`任务 ${groupIndex} 已生成 ${images.length} 张图片，ZIP 大小 ${formatBytes(zip.size)}。`, true);
+    triggerDownload(zip, `批量P图-已选${images.length}张.zip`);
+    showNotice(`已生成 ${images.length} 张图片，并按 ${groupCounters.size} 个比例文件夹打包；ZIP 大小 ${formatBytes(zip.size)}。`, true);
   } catch (error) {
     showNotice(`批量导出失败：${error.message}`, false);
   } finally {
@@ -1020,6 +1223,7 @@ async function downloadActiveGroup() {
 }
 
 async function renderImageBlob(image, group) {
+  if ((group.adjustments.smoothing || group.adjustments.skinBrightening) > 0) await ensureFaceDetection(image);
   const dimensions = exportDimensions(image.width, image.height, Number(els.maxEdge.value));
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { alpha: false });
@@ -1037,7 +1241,7 @@ function setExporting(active, progress) {
   state.exporting = active;
   els.exportProgress.hidden = !active;
   els.exportProgressBar.style.width = `${Math.round(progress * 100)}%`;
-  els.downloadGroup.textContent = active ? `正在高清压缩 ${Math.round(progress * 100)}%` : "高清压缩并导出当前组 ZIP";
+  els.downloadGroup.textContent = active ? `正在处理已选图片 ${Math.round(progress * 100)}%` : "高清压缩并导出已选图片 ZIP";
   updateButtons();
 }
 
@@ -1050,12 +1254,17 @@ function updateButtons() {
   els.savePreset.disabled = !getActiveGroup()?.overlays.length;
   els.updatePreset.disabled = !getActivePreset() || !getActiveGroup()?.overlays.length;
   els.downloadCurrent.disabled = !hasImage || state.exporting;
-  els.downloadGroup.disabled = !hasGroup || state.exporting;
+  els.downloadGroup.disabled = state.selectedImageIds.size === 0 || state.exporting;
+  els.selectCurrentGroup.disabled = !hasGroup || state.exporting;
+  els.clearCurrentGroup.disabled = !hasGroup || state.exporting;
+  els.selectAllImages.disabled = state.images.length === 0 || state.exporting;
+  els.clearImageSelection.disabled = state.selectedImageIds.size === 0 || state.exporting;
+  els.selectedImageCount.textContent = `已选 ${state.selectedImageIds.size} / ${state.images.length} 张`;
 }
 
 function updateGlobalStatus() {
   els.imageCount.textContent = `${state.images.length} 张`;
-  els.globalStatus.textContent = state.images.length ? `${state.groups.length} 个比例任务 · ${state.images.length} 张图片` : "等待添加图片";
+  els.globalStatus.textContent = state.images.length ? `${state.groups.length} 个比例任务 · 已选 ${state.selectedImageIds.size}/${state.images.length} 张` : "等待添加图片";
 }
 
 function restoreLogoLibrary() {

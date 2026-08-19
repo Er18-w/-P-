@@ -68,8 +68,11 @@
 
         <div class="filmstrip-wrap">
           <div class="filmstrip-heading">
-            <strong>组内图片</strong>
-            <span id="groupImageCount">0 张</span>
+            <div><strong>组内图片</strong><span id="groupImageCount">0 张</span></div>
+            <div class="filmstrip-actions">
+              <button id="selectCurrentGroup" class="text-button" disabled>本组全选</button>
+              <button id="clearCurrentGroup" class="text-button" disabled>取消本组</button>
+            </div>
           </div>
           <div id="thumbs" class="thumbs" aria-label="当前任务图片列表"></div>
         </div>
@@ -149,6 +152,12 @@
           <label class="range-field"><span>亮度 <output id="brightnessValue">0</output></span><input id="brightness" type="range" min="-40" max="60" value="0" /></label>
           <label class="range-field"><span>对比度 <output id="contrastValue">0</output></span><input id="contrast" type="range" min="-40" max="60" value="0" /></label>
           <label class="range-field"><span>饱和度 <output id="saturationValue">0</output></span><input id="saturation" type="range" min="-50" max="80" value="0" /></label>
+          <div class="beauty-divider">
+            <strong>批量人像美颜</strong>
+            <span id="beautyStatus">开启后自动识别人脸</span>
+          </div>
+          <label class="range-field"><span>磨皮 <output id="smoothingValue">0%</output></span><input id="smoothing" type="range" min="0" max="100" value="0" /></label>
+          <label class="range-field"><span>肤色提亮 <output id="skinBrighteningValue">0%</output></span><input id="skinBrightening" type="range" min="0" max="60" value="0" /></label>
         </section>
 
         <section class="tool-section export-section">
@@ -163,10 +172,17 @@
             <label>最长边<select id="maxEdge"><option value="0">保持原尺寸</option><option value="4096">4096 px</option><option value="2560">2560 px</option><option value="1920">1920 px</option></select></label>
           </div>
           <label class="range-field"><span>压缩质量 <output id="qualityValue">92%</output></span><input id="quality" type="range" min="55" max="100" value="92" /></label>
-          <p class="export-note">逐张按原像素或指定最长边重新编码，再打包为可下载 ZIP。</p>
+          <div class="export-selection">
+            <strong id="selectedImageCount">已选 0 / 0 张</strong>
+            <div>
+              <button id="selectAllImages" class="text-button" disabled>全部选择</button>
+              <button id="clearImageSelection" class="text-button" disabled>清空选择</button>
+            </div>
+          </div>
+          <p class="export-note">所选图片会按比例任务建立文件夹，再打包成一个 ZIP。</p>
           <div id="exportProgress" class="export-progress" hidden><div id="exportProgressBar"></div></div>
           <button id="downloadCurrent" class="secondary-button" disabled>下载当前预览</button>
-          <button id="downloadGroup" class="primary-button export-button" disabled>高清压缩并导出当前组 ZIP</button>
+          <button id="downloadGroup" class="primary-button export-button" disabled>高清压缩并导出已选图片 ZIP</button>
         </section>
       </aside>
     </main>
@@ -223,6 +239,9 @@
       </section>
     </div>
 
+    <script src="./third-party/tracking.min.js"></script>
+    <script src="./third-party/tracking-face.min.js"></script>
+    <script src="./third-party/stackblur.min.js"></script>
     <script src="./third-party/magic-wand.js"></script>
     <script src="./app.js"></script>
   </body>
