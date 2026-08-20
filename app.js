@@ -983,7 +983,7 @@ function renderPreview() {
       if (state.activeImageId === image.id) renderPreview();
     });
   } else if (beautyEnabled) {
-    els.beautyStatus.textContent = image.faces.length ? `当前图检测到 ${image.faces.length} 张脸` : "当前图未检测到正面人脸";
+    els.beautyStatus.textContent = image.faces.length ? `肤色智能美颜 · 检测到 ${image.faces.length} 张脸` : "肤色智能美颜已启用";
   } else {
     els.beautyStatus.textContent = "开启后自动识别人脸";
   }
@@ -1086,8 +1086,59 @@ function ensureFaceDetection(image) {
 function applyFaceBeauty(canvas, ctx, faces, adjustments) {
   const smoothing = Number(adjustments.smoothing || 0);
   const brightening = Number(adjustments.skinBrightening || 0);
-  if ((!smoothing && !brightening) || !faces.length || !window.StackBlur?.canvasRGBA) return;
+  if ((!smoothing && !brightening) || !window.StackBlur?.canvasRGBA) return;
+  applyGlobalSkinBeauty(canvas, ctx, smoothing, brightening);
   faces.forEach((face) => applyBeautyToFace(canvas, ctx, face, smoothing, brightening));
+}
+
+function applyGlobalSkinBeauty(canvas, ctx, smoothing, brightening) {
+  const workScale = Math.min(1, 1600 / Math.max(canvas.width, canvas.height));
+  const width = Math.max(1, Math.round(canvas.width * workScale));
+  const height = Math.max(1, Math.round(canvas.height * workScale));
+  const original = document.createElement("canvas");
+  original.width = width;
+  original.height = height;
+  const originalCtx = original.getContext("2d", { willReadFrequently: true });
+  originalCtx.drawImage(canvas, 0, 0, width, height);
+
+  const softened = document.createElement("canvas");
+  softened.width = width;
+  softened.height = height;
+  const softenedCtx = softened.getContext("2d", { willReadFrequently: true });
+  softenedCtx.drawImage(original, 0, 0);
+  if (smoothing) {
+    const radius = clamp(Math.round(Math.min(width, height) * (0.003 + smoothing * 0.0001)), 2, 24);
+    window.StackBlur.canvasRGBA(softened, 0, 0, width, height, radius);
+  }
+
+  const sourcePixels = originalCtx.getImageData(0, 0, width, height).data;
+  const resultData = softenedCtx.getImageData(0, 0, width, height);
+  const resultPixels = resultData.data;
+  const smoothStrength = smoothing / 100 * 0.68;
+  const brightenStrength = brightening / 60 * 0.24;
+  for (let index = 0; index < resultPixels.length; index += 4) {
+    const r = sourcePixels[index];
+    const g = sourcePixels[index + 1];
+    const b = sourcePixels[index + 2];
+    if (!isLikelySkin(r, g, b)) {
+      resultPixels[index + 3] = 0;
+      continue;
+    }
+    for (let channel = 0; channel < 3; channel += 1) {
+      const originalValue = sourcePixels[index + channel];
+      const smoothValue = resultPixels[index + channel];
+      let value = originalValue + (smoothValue - originalValue) * smoothStrength;
+      value += (255 - value) * brightenStrength;
+      resultPixels[index + channel] = clamp(Math.round(value), 0, 255);
+    }
+    resultPixels[index + 3] = 255;
+  }
+  softenedCtx.putImageData(resultData, 0, 0);
+  ctx.drawImage(softened, 0, 0, width, height, 0, 0, canvas.width, canvas.height);
+  original.width = 1;
+  original.height = 1;
+  softened.width = 1;
+  softened.height = 1;
 }
 
 function applyBeautyToFace(canvas, ctx, face, smoothing, brightening) {
@@ -1118,22 +1169,23 @@ function applyBeautyToFace(canvas, ctx, face, smoothing, brightening) {
   const resultData = softenedCtx.getImageData(0, 0, width, height);
   const sourcePixels = sourceData.data;
   const resultPixels = resultData.data;
-  const smoothStrength = smoothing / 100 * 0.72;
-  const brightenStrength = brightening / 60 * 0.16;
+  const smoothStrength = smoothing / 100 * 0.86;
+  const brightenStrength = brightening / 60 * 0.26;
   for (let y = 0; y < height; y += 1) {
     const normalizedY = (y / height - 0.48) / 0.52;
     for (let x = 0; x < width; x += 1) {
       const normalizedX = (x / width - 0.50) / 0.48;
       const distance = normalizedX * normalizedX + normalizedY * normalizedY;
-      if (distance >= 1) continue;
       const index = (y * width + x) * 4;
+      if (distance >= 1) {
+        resultPixels[index + 3] = 0;
+        continue;
+      }
       const r = sourcePixels[index];
       const g = sourcePixels[index + 1];
       const b = sourcePixels[index + 2];
       if (!isLikelySkin(r, g, b)) {
-        resultPixels[index] = r;
-        resultPixels[index + 1] = g;
-        resultPixels[index + 2] = b;
+        resultPixels[index + 3] = 0;
         continue;
       }
       const feather = clamp((1 - distance) * 2.5, 0, 1);
@@ -1145,6 +1197,7 @@ function applyBeautyToFace(canvas, ctx, face, smoothing, brightening) {
         value += (255 - value) * brightenStrength * feather;
         resultPixels[index + channel] = clamp(Math.round(value), 0, 255);
       }
+      resultPixels[index + 3] = 255;
     }
   }
   softenedCtx.putImageData(resultData, 0, 0);
@@ -1160,7 +1213,7 @@ function isLikelySkin(r, g, b) {
   const min = Math.min(r, g, b);
   const cb = 128 - 0.169 * r - 0.331 * g + 0.5 * b;
   const cr = 128 + 0.5 * r - 0.419 * g - 0.081 * b;
-  return r > 45 && g > 28 && b > 15 && max - min > 10 && r > g * 0.88 && r > b * 1.04 && cb > 70 && cb < 145 && cr > 125 && cr < 190;
+  return r > 35 && g > 20 && b > 10 && max - min > 8 && max - min < 180 && r > g * 0.85 && r > b * 0.95 && cb > 65 && cb < 150 && cr > 115 && cr < 195;
 }
 
 function drawOverlays(ctx, width, height, group, showSelection) {
