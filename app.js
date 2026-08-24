@@ -4,6 +4,7 @@ const GROUP_TOLERANCE = 0.008;
 const PREVIEW_ZOOM_MIN = 0.25;
 const PREVIEW_ZOOM_MAX = 4;
 const PREVIEW_ZOOM_STEP = 0.25;
+const MIN_OVERLAY_WIDTH = 0.03;
 
 const state = {
   images: [],
@@ -837,6 +838,11 @@ function startOverlayDrag(event) {
   }
   if (event.button !== 0) return;
   const point = pointerToCanvas(event);
+  const resizeTarget = getResizeTarget(point);
+  if (resizeTarget) {
+    startOverlayResize(event, resizeTarget);
+    return;
+  }
   const hit = [...group.overlays].reverse().find((overlay) => pointInOverlay(point, overlay));
   if (hit) {
     const members = hit.groupId
@@ -864,13 +870,21 @@ function startOverlayDrag(event) {
 }
 
 function moveOverlayDrag(event) {
-  if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+  if (!state.drag) {
+    updateResizeCursor(event);
+    return;
+  }
+  if (state.drag.pointerId !== event.pointerId) return;
   if (state.drag.type === "pan") {
     movePreviewPan(event);
     return;
   }
   const point = pointerToCanvas(event);
-  if (state.drag.type === "select") {
+  if (state.drag.type === "resize") {
+    resizeSelectedOverlays(point);
+    syncOverlayControls();
+    renderOverlayList();
+  } else if (state.drag.type === "select") {
     state.selectionBox.x = point.x;
     state.selectionBox.y = point.y;
     const selectionRect = normalizedRect(state.selectionBox.startX, state.selectionBox.startY, point.x, point.y);
@@ -907,6 +921,7 @@ function endOverlayDrag(event) {
   state.drag = null;
   state.selectionBox = null;
   els.previewCanvas.classList.remove("dragging");
+  clearResizeCursor();
   if (els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.releasePointerCapture(event.pointerId);
   renderOverlayList();
   renderOverlayGroupList();
@@ -930,6 +945,107 @@ function moveSelectedOverlays(point) {
     overlay.x = start.x + deltaX;
     overlay.y = start.y + deltaY;
   });
+}
+
+function startOverlayResize(event, target) {
+  const bounds = target.bounds;
+  const anchor = oppositeResizeAnchor(bounds, target.corner);
+  state.drag = {
+    type: "resize",
+    pointerId: event.pointerId,
+    corner: target.corner,
+    bounds,
+    anchor,
+    positions: target.overlays.map((overlay) => ({ id: overlay.id, x: overlay.x, y: overlay.y, width: overlay.width })),
+  };
+  els.previewCanvas.setPointerCapture(event.pointerId);
+  els.previewCanvas.classList.add("dragging");
+  setResizeCursor(target.corner);
+  event.preventDefault();
+}
+
+function resizeSelectedOverlays(point) {
+  const group = getActiveGroup();
+  const drag = state.drag;
+  if (!group || drag?.type !== "resize") return;
+  const pointer = { x: point.x / els.previewCanvas.width, y: point.y / els.previewCanvas.height };
+  const originalCorner = resizeCornerPoint(drag.bounds, drag.corner);
+  const originalVector = { x: originalCorner.x - drag.anchor.x, y: originalCorner.y - drag.anchor.y };
+  const pointerVector = { x: pointer.x - drag.anchor.x, y: pointer.y - drag.anchor.y };
+  const denominator = originalVector.x ** 2 + originalVector.y ** 2;
+  const requestedScale = denominator
+    ? (pointerVector.x * originalVector.x + pointerVector.y * originalVector.y) / denominator
+    : 1;
+  const minScale = Math.max(...drag.positions.map((position) => MIN_OVERLAY_WIDTH / position.width));
+  const maxScale = maxResizeScale(drag);
+  const scale = clamp(requestedScale, minScale, maxScale);
+  drag.positions.forEach((position) => {
+    const overlay = group.overlays.find((item) => item.id === position.id);
+    if (!overlay) return;
+    overlay.x = drag.anchor.x + (position.x - drag.anchor.x) * scale;
+    overlay.y = drag.anchor.y + (position.y - drag.anchor.y) * scale;
+    overlay.width = position.width * scale;
+  });
+}
+
+function maxResizeScale(drag) {
+  const { bounds, anchor, corner, positions } = drag;
+  const horizontal = corner.includes("w") ? anchor.x / bounds.width : (1 - anchor.x) / bounds.width;
+  const vertical = corner.includes("n") ? anchor.y / bounds.height : (1 - anchor.y) / bounds.height;
+  const memberWidth = Math.min(...positions.map((position) => 1 / position.width));
+  return Math.max(Math.max(...positions.map((position) => MIN_OVERLAY_WIDTH / position.width)), Math.min(horizontal, vertical, memberWidth));
+}
+
+function getResizeTarget(point) {
+  const group = getActiveGroup();
+  const selected = getSelectedOverlays();
+  if (!group || !selected.length) return null;
+  if (!state.activeOverlayGroupId && selected.length !== 1) return null;
+  const bounds = overlayBounds(selected, group);
+  const rect = {
+    x: bounds.x * els.previewCanvas.width,
+    y: bounds.y * els.previewCanvas.height,
+    width: bounds.width * els.previewCanvas.width,
+    height: bounds.height * els.previewCanvas.height,
+  };
+  const radius = selectionHandleSize(els.previewCanvas.width) * 0.72;
+  const handles = [
+    { corner: "nw", x: rect.x, y: rect.y },
+    { corner: "ne", x: rect.x + rect.width, y: rect.y },
+    { corner: "sw", x: rect.x, y: rect.y + rect.height },
+    { corner: "se", x: rect.x + rect.width, y: rect.y + rect.height },
+  ];
+  const handle = handles.find((item) => Math.abs(point.x - item.x) <= radius && Math.abs(point.y - item.y) <= radius);
+  return handle ? { corner: handle.corner, bounds, overlays: selected } : null;
+}
+
+function resizeCornerPoint(bounds, corner) {
+  return {
+    x: corner.includes("w") ? bounds.x : bounds.x + bounds.width,
+    y: corner.includes("n") ? bounds.y : bounds.y + bounds.height,
+  };
+}
+
+function oppositeResizeAnchor(bounds, corner) {
+  return {
+    x: corner.includes("w") ? bounds.x + bounds.width : bounds.x,
+    y: corner.includes("n") ? bounds.y + bounds.height : bounds.y,
+  };
+}
+
+function updateResizeCursor(event) {
+  const target = getResizeTarget(pointerToCanvas(event));
+  if (target) setResizeCursor(target.corner);
+  else clearResizeCursor();
+}
+
+function setResizeCursor(corner) {
+  els.previewCanvas.classList.toggle("resize-nwse", corner === "nw" || corner === "se");
+  els.previewCanvas.classList.toggle("resize-nesw", corner === "ne" || corner === "sw");
+}
+
+function clearResizeCursor() {
+  els.previewCanvas.classList.remove("resize-nwse", "resize-nesw");
 }
 
 function pointInOverlay(point, overlay) {
@@ -1630,12 +1746,16 @@ function drawSelection(ctx, rect) {
   ctx.fillStyle = "#ffffff";
   ctx.strokeStyle = "#2d5fc2";
   ctx.lineWidth = Math.max(4, els.previewCanvas.width / 220);
-  const size = Math.max(20, els.previewCanvas.width / 45);
+  const size = selectionHandleSize(els.previewCanvas.width);
   [[rect.x, rect.y], [rect.x + rect.width, rect.y], [rect.x, rect.y + rect.height], [rect.x + rect.width, rect.y + rect.height]].forEach(([x, y]) => {
     ctx.fillRect(x - size / 2, y - size / 2, size, size);
     ctx.strokeRect(x - size / 2, y - size / 2, size, size);
   });
   ctx.restore();
+}
+
+function selectionHandleSize(canvasWidth) {
+  return Math.max(20, canvasWidth / 45);
 }
 
 async function downloadCurrentImage() {

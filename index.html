@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="按图片比例分组，批量添加 Logo、调色并高清压缩导出。" />
     <title>批量P图工作台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260824-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260824-2" />
   </head>
   <body>
     <header class="app-header">
@@ -160,7 +160,7 @@
               <button data-position="bottom-right">右下</button>
               <button id="autoPlace">智能避色</button>
             </div>
-            <label class="range-field"><span>大小 <output id="logoSizeValue">18%</output></span><input id="logoSize" type="range" min="3" max="60" value="18" /></label>
+            <label class="range-field"><span>大小 <output id="logoSizeValue">18%</output></span><input id="logoSize" type="range" min="3" max="100" value="18" /></label>
             <label class="range-field"><span>透明度 <output id="logoOpacityValue">100%</output></span><input id="logoOpacity" type="range" min="10" max="100" value="100" /></label>
             <button id="removeOverlay" class="text-button">从当前任务移除</button>
           </div>
@@ -268,6 +268,6 @@
     <script src="./third-party/tracking-face.min.js?v=20260820-3"></script>
     <script src="./third-party/stackblur.min.js?v=20260820-3"></script>
     <script src="./third-party/magic-wand.js?v=20260820-3"></script>
-    <script src="./app.js?v=20260824-1"></script>
+    <script src="./app.js?v=20260824-2"></script>
   </body>
 </html>
