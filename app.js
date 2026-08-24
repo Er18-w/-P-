@@ -1,6 +1,9 @@
 const LOGO_STORAGE_KEY = "batch-photo-logo-library-v2";
 const PRESET_STORAGE_KEY = "batch-photo-logo-presets-v1";
 const GROUP_TOLERANCE = 0.008;
+const PREVIEW_ZOOM_MIN = 0.25;
+const PREVIEW_ZOOM_MAX = 4;
+const PREVIEW_ZOOM_STEP = 0.25;
 
 const state = {
   images: [],
@@ -13,8 +16,14 @@ const state = {
   focusedLogoId: null,
   selectedLogoIds: new Set(),
   selectedOverlayId: null,
+  selectedOverlayIds: new Set(),
+  activeOverlayGroupId: null,
   activePresetId: null,
   drag: null,
+  selectionBox: null,
+  previewZoom: 1,
+  previewFitScale: 1,
+  previewSpaceDown: false,
   exporting: false,
   cutout: {
     files: [],
@@ -33,8 +42,10 @@ const elementIds = [
   "imageInput", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
   "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
   "selectCurrentGroup", "clearCurrentGroup",
-  "previewCanvas", "emptyState", "notice", "logoLibrary", "logoEditor",
+  "previewStage", "previewViewport", "previewSurface", "previewCanvas", "emptyState", "notice",
+  "zoomOut", "zoomValue", "zoomIn", "zoomFit", "panHint", "logoLibrary", "logoEditor",
   "logoName", "logoGroup", "addLogoToJob", "deleteLogo", "overlayCount", "overlayList",
+  "overlayGroupCount", "overlayGroupList", "createOverlayGroup", "ungroupOverlay",
   "presetList", "presetName", "savePreset", "updatePreset", "activePresetStatus",
   "placementControls", "autoPlace", "logoSize", "logoSizeValue", "logoOpacity",
   "logoOpacityValue", "removeOverlay", "brightness", "brightnessValue", "contrast",
@@ -70,6 +81,8 @@ function bindEvents() {
   els.logoGroup.addEventListener("change", () => updateLogoMeta("group", els.logoGroup.value));
   els.addLogoToJob.addEventListener("click", addSelectedLogosToJob);
   els.deleteLogo.addEventListener("click", deleteSelectedLogos);
+  els.createOverlayGroup.addEventListener("click", createOverlayGroup);
+  els.ungroupOverlay.addEventListener("click", ungroupActiveOverlayGroup);
   els.savePreset.addEventListener("click", saveCurrentPreset);
   els.updatePreset.addEventListener("click", updateCurrentPreset);
   els.removeOverlay.addEventListener("click", removeSelectedOverlay);
@@ -106,6 +119,13 @@ function bindEvents() {
   els.previewCanvas.addEventListener("pointermove", moveOverlayDrag);
   els.previewCanvas.addEventListener("pointerup", endOverlayDrag);
   els.previewCanvas.addEventListener("pointercancel", endOverlayDrag);
+  els.previewCanvas.addEventListener("wheel", zoomPreviewWithWheel, { passive: false });
+  els.zoomOut.addEventListener("click", () => changePreviewZoom(-PREVIEW_ZOOM_STEP));
+  els.zoomIn.addEventListener("click", () => changePreviewZoom(PREVIEW_ZOOM_STEP));
+  els.zoomFit.addEventListener("click", resetPreviewZoom);
+  document.addEventListener("keydown", handlePreviewPanKeydown);
+  document.addEventListener("keyup", handlePreviewPanKeyup);
+  window.addEventListener("blur", releasePreviewPanModifier);
   window.addEventListener("resize", fitPreviewCanvas);
 }
 
@@ -428,6 +448,7 @@ function addImageToRatioGroup(image) {
       label: ratioLabel(ratio),
       imageIds: [],
       overlays: [],
+      overlayGroups: [],
       adjustments: { brightness: 0, contrast: 0, saturation: 0, smoothing: 0, skinBrightening: 0 },
     };
     state.groups.push(group);
@@ -450,7 +471,7 @@ function activateGroup(groupId) {
     applyPresetToGroup(preset.id, group);
   }
   state.activeImageId = group?.imageIds[0] || null;
-  state.selectedOverlayId = group?.overlays[0]?.id || null;
+  setOverlaySelection(group?.overlays[0] ? [group.overlays[0].id] : []);
   syncControlsFromGroup();
   renderAll();
 }
@@ -505,6 +526,9 @@ function clearTasks() {
   state.activeGroupId = null;
   state.activeImageId = null;
   state.selectedOverlayId = null;
+  state.selectedOverlayIds.clear();
+  state.activeOverlayGroupId = null;
+  state.selectionBox = null;
   hideNotice();
   renderAll();
 }
@@ -524,8 +548,9 @@ function addSelectedLogosToJob() {
   }));
   group.overlays.push(...added);
   added.forEach(clampOverlay);
-  state.selectedOverlayId = added.at(-1)?.id || group.overlays.at(-1)?.id || null;
+  setOverlaySelection(added.length ? added.map((overlay) => overlay.id) : [group.overlays.at(-1)?.id].filter(Boolean));
   renderOverlayList();
+  renderOverlayGroupList();
   syncOverlayControls();
   renderPreview();
   renderGroupList();
@@ -534,10 +559,12 @@ function addSelectedLogosToJob() {
 
 function removeSelectedOverlay() {
   const group = getActiveGroup();
-  if (!group) return;
+  if (!group || state.activeOverlayGroupId) return;
   group.overlays = group.overlays.filter((overlay) => overlay.id !== state.selectedOverlayId);
-  state.selectedOverlayId = group.overlays[0]?.id || null;
+  pruneOverlayGroups(group);
+  setOverlaySelection(group.overlays[0] ? [group.overlays[0].id] : []);
   renderOverlayList();
+  renderOverlayGroupList();
   syncOverlayControls();
   renderPreview();
   renderGroupList();
@@ -548,14 +575,18 @@ function deleteSelectedLogos() {
   const ids = new Set(state.selectedLogoIds);
   if (!ids.size) return;
   state.logos = state.logos.filter((item) => !ids.has(item.id));
-  state.groups.forEach((group) => { group.overlays = group.overlays.filter((overlay) => !ids.has(overlay.logoId)); });
+  state.groups.forEach((group) => {
+    group.overlays = group.overlays.filter((overlay) => !ids.has(overlay.logoId));
+    pruneOverlayGroups(group);
+  });
   state.presets.forEach((preset) => { preset.overlays = preset.overlays.filter((overlay) => !ids.has(overlay.logoId)); });
+  state.presets.forEach(prunePresetGroups);
   state.presets = state.presets.filter((preset) => preset.overlays.length);
   if (!state.presets.some((preset) => preset.id === state.activePresetId)) state.activePresetId = null;
   state.selectedLogoIds.clear();
   state.focusedLogoId = state.logos[0]?.id || null;
   const activeGroup = getActiveGroup();
-  state.selectedOverlayId = activeGroup?.overlays[0]?.id || null;
+  setOverlaySelection(activeGroup?.overlays[0] ? [activeGroup.overlays[0].id] : []);
   persistLogoLibrary();
   persistPresets();
   renderAll();
@@ -578,6 +609,7 @@ function saveCurrentPreset() {
     id: uid(),
     name: els.presetName.value.trim() || `Logo 组合 ${state.presets.length + 1}`,
     overlays: serializeOverlays(group.overlays),
+    overlayGroups: serializeOverlayGroups(group.overlayGroups),
     updatedAt: Date.now(),
   };
   state.presets.push(preset);
@@ -597,6 +629,7 @@ function updateCurrentPreset() {
   if (!group?.overlays.length || !preset) return;
   preset.name = els.presetName.value.trim() || preset.name;
   preset.overlays = serializeOverlays(group.overlays);
+  preset.overlayGroups = serializeOverlayGroups(group.overlayGroups);
   preset.updatedAt = Date.now();
   group.presetId = preset.id;
   group.presetUpdatedAt = preset.updatedAt;
@@ -618,13 +651,15 @@ function activatePreset(presetId) {
 function applyPresetToGroup(presetId, group) {
   const preset = state.presets.find((item) => item.id === presetId);
   if (!preset) return;
+  const groupIdMap = new Map((preset.overlayGroups || []).map((item) => [item.id, uid()]));
+  group.overlayGroups = (preset.overlayGroups || []).map((item) => ({ ...item, id: groupIdMap.get(item.id) }));
   group.overlays = preset.overlays
     .filter((overlay) => getLogoById(overlay.logoId))
-    .map((overlay) => ({ ...overlay, id: uid() }));
+    .map((overlay) => ({ ...overlay, id: uid(), groupId: groupIdMap.get(overlay.groupId) || null }));
   group.overlays.forEach((overlay) => clampOverlayForGroup(overlay, group));
   group.presetId = preset.id;
   group.presetUpdatedAt = preset.updatedAt;
-  state.selectedOverlayId = group.overlays[0]?.id || null;
+  setOverlaySelection(group.overlays[0] ? [group.overlays[0].id] : []);
 }
 
 function deletePreset(presetId) {
@@ -636,7 +671,87 @@ function deletePreset(presetId) {
 }
 
 function serializeOverlays(overlays) {
-  return overlays.map(({ logoId, x, y, width, opacity }) => ({ logoId, x, y, width, opacity }));
+  return overlays.map(({ logoId, x, y, width, opacity, groupId }) => ({ logoId, x, y, width, opacity, groupId: groupId || null }));
+}
+
+function serializeOverlayGroups(groups = []) {
+  return groups.map(({ id, name }) => ({ id, name }));
+}
+
+function prunePresetGroups(preset) {
+  const usedIds = new Set(preset.overlays.map((overlay) => overlay.groupId).filter(Boolean));
+  preset.overlayGroups = (preset.overlayGroups || []).filter((item) => usedIds.has(item.id));
+}
+
+function setOverlaySelection(overlayIds, overlayGroupId = null) {
+  const group = getActiveGroup();
+  const validIds = new Set((overlayIds || []).filter((id) => group?.overlays.some((overlay) => overlay.id === id)));
+  state.selectedOverlayIds = validIds;
+  state.selectedOverlayId = validIds.values().next().value || null;
+  state.activeOverlayGroupId = overlayGroupId && group?.overlayGroups?.some((item) => item.id === overlayGroupId)
+    ? overlayGroupId
+    : null;
+}
+
+function createOverlayGroup() {
+  const group = getActiveGroup();
+  const selected = getSelectedOverlays();
+  if (!group || selected.length < 2 || selected.some((overlay) => overlay.groupId)) return;
+  group.overlayGroups ||= [];
+  const overlayGroup = {
+    id: uid(),
+    name: `组合 ${group.overlayGroups.length + 1}`,
+  };
+  selected.forEach((overlay) => { overlay.groupId = overlayGroup.id; });
+  group.overlayGroups.push(overlayGroup);
+  setOverlaySelection(selected.map((overlay) => overlay.id), overlayGroup.id);
+  renderOverlayList();
+  renderOverlayGroupList();
+  syncOverlayControls();
+  renderPreview();
+  updateButtons();
+  showNotice(`${overlayGroup.name}已锁定，解散后才能单独编辑成员。`, true);
+}
+
+function ungroupActiveOverlayGroup() {
+  const group = getActiveGroup();
+  const overlayGroup = getActiveOverlayGroup();
+  if (!group || !overlayGroup) return;
+  const memberIds = group.overlays.filter((overlay) => overlay.groupId === overlayGroup.id).map((overlay) => overlay.id);
+  group.overlays.forEach((overlay) => {
+    if (overlay.groupId === overlayGroup.id) overlay.groupId = null;
+  });
+  group.overlayGroups = (group.overlayGroups || []).filter((item) => item.id !== overlayGroup.id);
+  setOverlaySelection(memberIds);
+  renderOverlayList();
+  renderOverlayGroupList();
+  syncOverlayControls();
+  renderPreview();
+  updateButtons();
+  showNotice(`${overlayGroup.name}已解散，Logo 保留在原位置。`, true);
+}
+
+function activateOverlayGroup(overlayGroupId) {
+  const group = getActiveGroup();
+  if (!group) return;
+  if (state.activeOverlayGroupId === overlayGroupId) {
+    setOverlaySelection([]);
+  } else {
+    const memberIds = group.overlays.filter((overlay) => overlay.groupId === overlayGroupId).map((overlay) => overlay.id);
+    setOverlaySelection(memberIds, overlayGroupId);
+  }
+  renderOverlayList();
+  renderOverlayGroupList();
+  syncOverlayControls();
+  renderPreview();
+  updateButtons();
+}
+
+function pruneOverlayGroups(group) {
+  group.overlayGroups ||= [];
+  const usedIds = new Set(group.overlays.map((overlay) => overlay.groupId).filter(Boolean));
+  group.overlayGroups = group.overlayGroups.filter((item) => usedIds.has(item.id));
+  if (state.activeGroupId === group.id && !usedIds.has(state.activeOverlayGroupId)) state.activeOverlayGroupId = null;
 }
 
 function updateOverlayFromControls() {
@@ -716,34 +831,105 @@ function autoPlaceSelectedOverlay() {
 function startOverlayDrag(event) {
   const group = getActiveGroup();
   if (!group) return;
+  if (event.button === 1 || state.previewSpaceDown) {
+    startPreviewPan(event);
+    return;
+  }
+  if (event.button !== 0) return;
   const point = pointerToCanvas(event);
   const hit = [...group.overlays].reverse().find((overlay) => pointInOverlay(point, overlay));
-  if (!hit) return;
-  state.selectedOverlayId = hit.id;
-  state.drag = { pointerId: event.pointerId, offsetX: point.x - hit.x * els.previewCanvas.width, offsetY: point.y - hit.y * els.previewCanvas.height };
+  if (hit) {
+    const members = hit.groupId
+      ? group.overlays.filter((overlay) => overlay.groupId === hit.groupId)
+      : [hit];
+    setOverlaySelection(members.map((overlay) => overlay.id), hit.groupId || null);
+    state.drag = {
+      type: "move",
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      positions: members.map((overlay) => ({ id: overlay.id, x: overlay.x, y: overlay.y })),
+    };
+  } else {
+    setOverlaySelection([]);
+    state.selectionBox = { startX: point.x, startY: point.y, x: point.x, y: point.y };
+    state.drag = { type: "select", pointerId: event.pointerId };
+  }
   els.previewCanvas.setPointerCapture(event.pointerId);
   els.previewCanvas.classList.add("dragging");
   renderOverlayList();
+  renderOverlayGroupList();
   syncOverlayControls();
   renderPreview();
 }
 
 function moveOverlayDrag(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
-  const overlay = getSelectedOverlay();
-  if (!overlay) return;
+  if (state.drag.type === "pan") {
+    movePreviewPan(event);
+    return;
+  }
   const point = pointerToCanvas(event);
-  overlay.x = (point.x - state.drag.offsetX) / els.previewCanvas.width;
-  overlay.y = (point.y - state.drag.offsetY) / els.previewCanvas.height;
-  clampOverlay(overlay);
+  if (state.drag.type === "select") {
+    state.selectionBox.x = point.x;
+    state.selectionBox.y = point.y;
+    const selectionRect = normalizedRect(state.selectionBox.startX, state.selectionBox.startY, point.x, point.y);
+    const selectedIds = new Set();
+    getActiveGroup().overlays.forEach((overlay) => {
+      if (!rectsIntersect(selectionRect, overlayRect(overlay, els.previewCanvas.width, els.previewCanvas.height))) return;
+      if (overlay.groupId) {
+        getActiveGroup().overlays.filter((item) => item.groupId === overlay.groupId).forEach((item) => selectedIds.add(item.id));
+      } else {
+        selectedIds.add(overlay.id);
+      }
+    });
+    setOverlaySelection([...selectedIds]);
+    renderOverlayList();
+    renderOverlayGroupList();
+    updateButtons();
+  } else {
+    moveSelectedOverlays(point);
+  }
   renderPreview();
 }
 
 function endOverlayDrag(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+  if (state.drag.type === "pan") {
+    endPreviewPan(event);
+    return;
+  }
+  if (state.drag.type === "select" && state.selectionBox) {
+    const width = Math.abs(state.selectionBox.x - state.selectionBox.startX);
+    const height = Math.abs(state.selectionBox.y - state.selectionBox.startY);
+    if (width < 5 && height < 5) setOverlaySelection([]);
+  }
   state.drag = null;
+  state.selectionBox = null;
   els.previewCanvas.classList.remove("dragging");
   if (els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.releasePointerCapture(event.pointerId);
+  renderOverlayList();
+  renderOverlayGroupList();
+  syncOverlayControls();
+  renderPreview();
+  updateButtons();
+}
+
+function moveSelectedOverlays(point) {
+  const group = getActiveGroup();
+  const positions = state.drag.positions;
+  if (!group || !positions.length) return;
+  const selected = positions.map((position) => group.overlays.find((overlay) => overlay.id === position.id)).filter(Boolean);
+  const startBounds = overlayBounds(positions.map((position) => ({ ...group.overlays.find((overlay) => overlay.id === position.id), x: position.x, y: position.y })), group);
+  let deltaX = (point.x - state.drag.startX) / els.previewCanvas.width;
+  let deltaY = (point.y - state.drag.startY) / els.previewCanvas.height;
+  deltaX = clamp(deltaX, -startBounds.x, 1 - startBounds.x - startBounds.width);
+  deltaY = clamp(deltaY, -startBounds.y, 1 - startBounds.y - startBounds.height);
+  selected.forEach((overlay) => {
+    const start = positions.find((position) => position.id === overlay.id);
+    overlay.x = start.x + deltaX;
+    overlay.y = start.y + deltaY;
+  });
 }
 
 function pointInOverlay(point, overlay) {
@@ -754,6 +940,80 @@ function pointInOverlay(point, overlay) {
 function pointerToCanvas(event) {
   const rect = els.previewCanvas.getBoundingClientRect();
   return { x: (event.clientX - rect.left) * els.previewCanvas.width / rect.width, y: (event.clientY - rect.top) * els.previewCanvas.height / rect.height };
+}
+
+function startPreviewPan(event) {
+  event.preventDefault();
+  state.drag = {
+    type: "pan",
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    scrollLeft: els.previewViewport.scrollLeft,
+    scrollTop: els.previewViewport.scrollTop,
+  };
+  els.previewCanvas.setPointerCapture(event.pointerId);
+  els.previewStage.classList.add("panning");
+}
+
+function movePreviewPan(event) {
+  els.previewViewport.scrollLeft = state.drag.scrollLeft - (event.clientX - state.drag.clientX);
+  els.previewViewport.scrollTop = state.drag.scrollTop - (event.clientY - state.drag.clientY);
+}
+
+function endPreviewPan(event) {
+  state.drag = null;
+  els.previewStage.classList.remove("panning");
+  if (els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.releasePointerCapture(event.pointerId);
+}
+
+function handlePreviewPanKeydown(event) {
+  if (event.code !== "Space" || isTextEntryTarget(event.target) || !getActiveImage()) return;
+  event.preventDefault();
+  state.previewSpaceDown = true;
+  els.previewStage.classList.add("space-pan");
+}
+
+function handlePreviewPanKeyup(event) {
+  if (event.code !== "Space") return;
+  releasePreviewPanModifier();
+}
+
+function releasePreviewPanModifier() {
+  state.previewSpaceDown = false;
+  els.previewStage.classList.remove("space-pan");
+}
+
+function isTextEntryTarget(target) {
+  return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+}
+
+function normalizedRect(startX, startY, endX, endY) {
+  return {
+    x: Math.min(startX, endX),
+    y: Math.min(startY, endY),
+    width: Math.abs(endX - startX),
+    height: Math.abs(endY - startY),
+  };
+}
+
+function rectsIntersect(first, second) {
+  return first.x <= second.x + second.width && first.x + first.width >= second.x
+    && first.y <= second.y + second.height && first.y + first.height >= second.y;
+}
+
+function overlayBounds(overlays, group) {
+  if (!overlays.length) return { x: 0, y: 0, width: 0, height: 0 };
+  const bounds = overlays.map((overlay) => {
+    const logo = getLogoById(overlay.logoId);
+    const height = logo ? overlayHeightNormalized(overlay, logo, group.ratio) : 0;
+    return { left: overlay.x, top: overlay.y, right: overlay.x + overlay.width, bottom: overlay.y + height };
+  });
+  const left = Math.min(...bounds.map((item) => item.left));
+  const top = Math.min(...bounds.map((item) => item.top));
+  const right = Math.max(...bounds.map((item) => item.right));
+  const bottom = Math.max(...bounds.map((item) => item.bottom));
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 function clampOverlay(overlay) {
@@ -776,6 +1036,7 @@ function renderAll() {
   renderLogoLibrary();
   renderLogoEditor();
   renderOverlayList();
+  renderOverlayGroupList();
   renderPresetList();
   syncControlsFromGroup();
   renderPreview();
@@ -849,13 +1110,26 @@ function renderLogoLibrary() {
     heading.textContent = groupName;
     els.logoLibrary.append(heading);
     logos.forEach((logo) => {
-      const button = document.createElement("button");
+      const card = document.createElement("div");
       const selected = state.selectedLogoIds.has(logo.id);
-      button.className = `logo-card${selected ? " active" : ""}${logo.id === state.focusedLogoId ? " focused" : ""}`;
-      button.type = "button";
-      button.setAttribute("aria-pressed", String(selected));
-      button.innerHTML = `<span class="logo-check">✓</span><img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span>`;
-      button.addEventListener("click", () => {
+      card.className = `logo-card${selected ? " active" : ""}${logo.id === state.focusedLogoId ? " focused" : ""}`;
+      const focus = document.createElement("button");
+      focus.type = "button";
+      focus.className = "logo-card-main";
+      focus.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span>`;
+      focus.title = `编辑 ${logo.name}`;
+      focus.addEventListener("click", () => {
+        state.focusedLogoId = logo.id;
+        renderLogoLibrary();
+        renderLogoEditor();
+      });
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "logo-check";
+      toggle.setAttribute("aria-pressed", String(selected));
+      toggle.setAttribute("aria-label", selected ? `取消选择 ${logo.name}` : `选择 ${logo.name}`);
+      toggle.textContent = "✓";
+      toggle.addEventListener("click", () => {
         state.focusedLogoId = logo.id;
         if (state.selectedLogoIds.has(logo.id)) state.selectedLogoIds.delete(logo.id);
         else state.selectedLogoIds.add(logo.id);
@@ -863,7 +1137,8 @@ function renderLogoLibrary() {
         renderLogoEditor();
         updateButtons();
       });
-      els.logoLibrary.append(button);
+      card.append(focus, toggle);
+      els.logoLibrary.append(card);
     });
   });
 }
@@ -920,15 +1195,48 @@ function renderOverlayList() {
     const logo = getLogoById(overlay.logoId);
     if (!logo) return;
     const button = document.createElement("button");
-    button.className = `overlay-item${overlay.id === state.selectedOverlayId ? " active" : ""}`;
-    button.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span><small>${Math.round(overlay.width * 100)}%</small>`;
+    const selected = state.selectedOverlayIds.has(overlay.id);
+    const locked = Boolean(overlay.groupId);
+    button.className = `overlay-item${selected ? " active" : ""}`;
+    button.innerHTML = `<img src="${logo.dataUrl}" alt=""><span>${escapeHtml(logo.name)}</span><small>${locked ? "已锁组" : `${Math.round(overlay.width * 100)}%`}</small>`;
     button.addEventListener("click", () => {
-      state.selectedOverlayId = overlay.id;
+      if (overlay.groupId) {
+        const memberIds = overlays.filter((item) => item.groupId === overlay.groupId).map((item) => item.id);
+        setOverlaySelection(memberIds, overlay.groupId);
+      } else if (selected && state.selectedOverlayIds.size === 1) {
+        setOverlaySelection([]);
+      } else {
+        setOverlaySelection([overlay.id]);
+      }
       renderOverlayList();
+      renderOverlayGroupList();
       syncOverlayControls();
       renderPreview();
+      updateButtons();
     });
     els.overlayList.append(button);
+  });
+}
+
+function renderOverlayGroupList() {
+  const group = getActiveGroup();
+  const overlayGroups = group?.overlayGroups || [];
+  els.overlayGroupCount.textContent = `${overlayGroups.length} 组`;
+  if (!overlayGroups.length) {
+    els.overlayGroupList.innerHTML = '<p class="tool-empty">尚未创建组合。</p>';
+    return;
+  }
+  els.overlayGroupList.innerHTML = "";
+  overlayGroups.forEach((overlayGroup) => {
+    const memberCount = group.overlays.filter((overlay) => overlay.groupId === overlayGroup.id).length;
+    const selected = state.activeOverlayGroupId === overlayGroup.id;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `overlay-group-choice${selected ? " active" : ""}`;
+    button.setAttribute("aria-pressed", String(selected));
+    button.innerHTML = `<span class="overlay-group-check">✓</span><strong>${escapeHtml(overlayGroup.name)}</strong><small>${memberCount} 个 Logo</small>`;
+    button.addEventListener("click", () => activateOverlayGroup(overlayGroup.id));
+    els.overlayGroupList.append(button);
   });
 }
 
@@ -946,7 +1254,7 @@ function syncControlsFromGroup() {
 
 function syncOverlayControls() {
   const overlay = getSelectedOverlay();
-  els.placementControls.hidden = !overlay;
+  els.placementControls.hidden = !overlay || Boolean(state.activeOverlayGroupId);
   if (!overlay) return;
   els.logoSize.value = Math.round(overlay.width * 100);
   els.logoOpacity.value = Math.round(overlay.opacity * 100);
@@ -971,8 +1279,12 @@ function renderPreview() {
     previewCtx.clearRect(0, 0, els.previewCanvas.width, els.previewCanvas.height);
     els.previewCanvas.style.width = "";
     els.previewCanvas.style.height = "";
+    els.previewSurface.style.width = "";
+    els.previewSurface.style.height = "";
+    els.previewViewport.scrollTo({ left: 0, top: 0 });
     els.emptyState.classList.remove("hidden");
     els.previewCanvas.classList.remove("can-drag");
+    updatePreviewZoomControls();
     return;
   }
   els.emptyState.classList.add("hidden");
@@ -994,14 +1306,66 @@ function renderPreview() {
 }
 
 function fitPreviewCanvas() {
-  const stage = els.previewCanvas.parentElement;
+  const stage = els.previewViewport;
   if (!stage || !getActiveImage()) return;
   const workspace = stage.closest(".workspace");
   const maxWidth = Math.max(180, (workspace?.clientWidth || stage.clientWidth) - 40);
   const maxHeight = Math.max(220, stage.getBoundingClientRect().height - 40);
-  const scale = Math.min(maxWidth / els.previewCanvas.width, maxHeight / els.previewCanvas.height, 1);
-  els.previewCanvas.style.width = `${Math.round(els.previewCanvas.width * scale)}px`;
-  els.previewCanvas.style.height = `${Math.round(els.previewCanvas.height * scale)}px`;
+  state.previewFitScale = Math.min(maxWidth / els.previewCanvas.width, maxHeight / els.previewCanvas.height, 1);
+  applyPreviewZoom();
+}
+
+function zoomPreviewWithWheel(event) {
+  if (!getActiveImage()) return;
+  event.preventDefault();
+  const direction = event.deltaY < 0 ? 1 : -1;
+  setPreviewZoom(state.previewZoom + direction * PREVIEW_ZOOM_STEP, event);
+}
+
+function changePreviewZoom(delta) {
+  setPreviewZoom(state.previewZoom + delta);
+}
+
+function resetPreviewZoom() {
+  setPreviewZoom(1);
+  els.previewViewport.scrollTo({ left: 0, top: 0 });
+}
+
+function setPreviewZoom(value, anchorEvent = null) {
+  const nextZoom = clamp(Number(value), PREVIEW_ZOOM_MIN, PREVIEW_ZOOM_MAX);
+  if (nextZoom === state.previewZoom) return;
+  const oldRect = els.previewCanvas.getBoundingClientRect();
+  const anchor = anchorEvent
+    ? { x: anchorEvent.clientX, y: anchorEvent.clientY }
+    : { x: oldRect.left + oldRect.width / 2, y: oldRect.top + oldRect.height / 2 };
+  const relativeX = oldRect.width ? clamp((anchor.x - oldRect.left) / oldRect.width, 0, 1) : 0.5;
+  const relativeY = oldRect.height ? clamp((anchor.y - oldRect.top) / oldRect.height, 0, 1) : 0.5;
+  state.previewZoom = nextZoom;
+  applyPreviewZoom();
+  const newRect = els.previewCanvas.getBoundingClientRect();
+  els.previewViewport.scrollLeft += newRect.left + relativeX * newRect.width - anchor.x;
+  els.previewViewport.scrollTop += newRect.top + relativeY * newRect.height - anchor.y;
+}
+
+function applyPreviewZoom() {
+  if (!getActiveImage()) return;
+  const displayScale = state.previewFitScale * state.previewZoom;
+  const width = Math.max(1, Math.round(els.previewCanvas.width * displayScale));
+  const height = Math.max(1, Math.round(els.previewCanvas.height * displayScale));
+  els.previewCanvas.style.width = `${width}px`;
+  els.previewCanvas.style.height = `${height}px`;
+  els.previewSurface.style.width = `${width + 40}px`;
+  els.previewSurface.style.height = `${height + 40}px`;
+  updatePreviewZoomControls();
+}
+
+function updatePreviewZoomControls() {
+  const hasImage = Boolean(getActiveImage());
+  els.zoomValue.textContent = `${Math.round(state.previewZoom * 100)}%`;
+  els.zoomOut.disabled = !hasImage || state.previewZoom <= PREVIEW_ZOOM_MIN;
+  els.zoomIn.disabled = !hasImage || state.previewZoom >= PREVIEW_ZOOM_MAX;
+  els.zoomFit.disabled = !hasImage || state.previewZoom === 1;
+  els.panHint.hidden = !hasImage || state.previewZoom <= 1;
 }
 
 function drawBaseImage(image, group, canvas, ctx, targetDimensions = null) {
@@ -1225,8 +1589,33 @@ function drawOverlays(ctx, width, height, group, showSelection) {
     ctx.globalAlpha = overlay.opacity;
     ctx.drawImage(logo.img, rect.x, rect.y, rect.width, rect.height);
     ctx.restore();
-    if (showSelection && overlay.id === state.selectedOverlayId) drawSelection(ctx, rect);
   });
+  if (!showSelection) return;
+  const selected = getSelectedOverlays();
+  if (state.activeOverlayGroupId && selected.length) {
+    const bounds = overlayBounds(selected, group);
+    drawSelection(ctx, {
+      x: bounds.x * width,
+      y: bounds.y * height,
+      width: bounds.width * width,
+      height: bounds.height * height,
+    });
+  } else {
+    selected.forEach((overlay) => drawSelection(ctx, overlayRect(overlay, width, height)));
+  }
+  if (state.selectionBox) drawMarquee(ctx, state.selectionBox);
+}
+
+function drawMarquee(ctx, box) {
+  const rect = normalizedRect(box.startX, box.startY, box.x, box.y);
+  ctx.save();
+  ctx.fillStyle = "rgba(8, 127, 115, 0.10)";
+  ctx.strokeStyle = "#087f73";
+  ctx.lineWidth = Math.max(3, els.previewCanvas.width / 350);
+  ctx.setLineDash([14, 8]);
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
 }
 
 function drawSelection(ctx, rect) {
@@ -1324,9 +1713,12 @@ function setExporting(active, progress) {
 function updateButtons() {
   const hasGroup = Boolean(getActiveGroup());
   const hasImage = Boolean(getActiveImage());
+  const selectedOverlays = getSelectedOverlays();
   els.clearAll.disabled = state.images.length === 0;
   els.addLogoToJob.disabled = !hasGroup || state.selectedLogoIds.size === 0;
   els.deleteLogo.disabled = state.selectedLogoIds.size === 0;
+  els.createOverlayGroup.disabled = selectedOverlays.length < 2 || selectedOverlays.some((overlay) => overlay.groupId);
+  els.ungroupOverlay.disabled = !getActiveOverlayGroup();
   els.savePreset.disabled = !getActiveGroup()?.overlays.length;
   els.updatePreset.disabled = !getActivePreset() || !getActiveGroup()?.overlays.length;
   els.downloadCurrent.disabled = !hasImage || state.exporting;
@@ -1426,7 +1818,16 @@ function getActiveImage() { return getImageById(state.activeImageId); }
 function getImageById(id) { return state.images.find((image) => image.id === id) || null; }
 function getSelectedLogo() { return getLogoById(state.focusedLogoId); }
 function getLogoById(id) { return state.logos.find((logo) => logo.id === id) || null; }
-function getSelectedOverlay() { return getActiveGroup()?.overlays.find((overlay) => overlay.id === state.selectedOverlayId) || null; }
+function getSelectedOverlay() {
+  if (state.selectedOverlayIds.size !== 1 || state.activeOverlayGroupId) return null;
+  return getActiveGroup()?.overlays.find((overlay) => overlay.id === state.selectedOverlayId) || null;
+}
+function getSelectedOverlays() {
+  return getActiveGroup()?.overlays.filter((overlay) => state.selectedOverlayIds.has(overlay.id)) || [];
+}
+function getActiveOverlayGroup() {
+  return getActiveGroup()?.overlayGroups?.find((group) => group.id === state.activeOverlayGroupId) || null;
+}
 function getActivePreset() { return state.presets.find((preset) => preset.id === state.activePresetId) || null; }
 
 function overlayRect(overlay, imageWidth, imageHeight) {

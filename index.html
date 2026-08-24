@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="按图片比例分组，批量添加 Logo、调色并高清压缩导出。" />
     <title>批量P图工作台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260820-3" />
+    <link rel="stylesheet" href="./styles.css?v=20260824-1" />
   </head>
   <body>
     <header class="app-header">
@@ -58,8 +58,19 @@
 
         <div id="notice" class="notice" role="status" hidden></div>
 
-        <div class="preview-stage">
-          <canvas id="previewCanvas" width="1200" height="800" aria-label="图片与 Logo 实时预览"></canvas>
+        <div id="previewStage" class="preview-stage">
+          <div id="previewViewport" class="preview-viewport">
+            <div id="previewSurface" class="preview-surface">
+              <canvas id="previewCanvas" width="1200" height="800" aria-label="图片与 Logo 实时预览"></canvas>
+            </div>
+          </div>
+          <div class="zoom-controls" aria-label="预览缩放工具">
+            <button id="zoomOut" type="button" title="缩小预览">−</button>
+            <output id="zoomValue" aria-live="polite">100%</output>
+            <button id="zoomIn" type="button" title="放大预览">+</button>
+            <button id="zoomFit" class="zoom-fit" type="button">适合窗口</button>
+          </div>
+          <div id="panHint" class="pan-hint" hidden>按住空格并拖动，可移动画布</div>
           <div id="emptyState" class="empty-state">
             <strong>先添加图片</strong>
             <span>相同比例会自动放进同一个批处理任务。</span>
@@ -111,6 +122,20 @@
           </div>
           <div id="overlayList" class="overlay-list">
             <p class="tool-empty">从 Logo 库一键添加，可叠加多个 Logo。</p>
+          </div>
+          <div class="overlay-group-panel">
+            <div class="preset-heading">
+              <strong>Logo 组合</strong>
+              <span id="overlayGroupCount">0 组</span>
+            </div>
+            <p class="group-help">在画布空白处按住左键拖框，选中多个 Logo 后创建组合。</p>
+            <div id="overlayGroupList" class="overlay-group-list">
+              <p class="tool-empty">尚未创建组合。</p>
+            </div>
+            <div class="group-actions">
+              <button id="createOverlayGroup" class="secondary-button" disabled>创建组合</button>
+              <button id="ungroupOverlay" class="quiet-button" disabled>解散组合</button>
+            </div>
           </div>
           <div class="preset-panel">
             <div class="preset-heading">
@@ -243,6 +268,6 @@
     <script src="./third-party/tracking-face.min.js?v=20260820-3"></script>
     <script src="./third-party/stackblur.min.js?v=20260820-3"></script>
     <script src="./third-party/magic-wand.js?v=20260820-3"></script>
-    <script src="./app.js?v=20260820-3"></script>
+    <script src="./app.js?v=20260824-1"></script>
   </body>
 </html>
