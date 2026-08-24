@@ -5,6 +5,7 @@ const PREVIEW_ZOOM_MIN = 0.25;
 const PREVIEW_ZOOM_MAX = 4;
 const PREVIEW_ZOOM_STEP = 0.25;
 const MIN_OVERLAY_WIDTH = 0.03;
+const EDITOR_HISTORY_LIMIT = 50;
 
 const state = {
   images: [],
@@ -25,7 +26,16 @@ const state = {
   previewZoom: 1,
   previewFitScale: 1,
   previewSpaceDown: false,
+  mobilePanel: null,
+  mobileMultiSelect: false,
+  touchPointers: new Map(),
+  pinch: null,
   exporting: false,
+  editorHistory: {
+    undoStack: [],
+    redoStack: [],
+    transactionSnapshot: null,
+  },
   cutout: {
     files: [],
     index: 0,
@@ -42,6 +52,8 @@ const state = {
 const elementIds = [
   "imageInput", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
   "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
+  "undoEdit", "redoEdit",
+  "mobileSheetBackdrop", "mobileNav", "mobileSheetTitle", "mobileMultiSelect",
   "selectCurrentGroup", "clearCurrentGroup",
   "previewStage", "previewViewport", "previewSurface", "previewCanvas", "emptyState", "notice",
   "zoomOut", "zoomValue", "zoomIn", "zoomFit", "panHint", "logoLibrary", "logoEditor",
@@ -62,6 +74,10 @@ const elementIds = [
 const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 els.positionButtons = [...document.querySelectorAll("[data-position]")];
 els.cutoutModeButtons = [...document.querySelectorAll("[data-cutout-mode]")];
+els.mobileNavButtons = [...document.querySelectorAll("[data-mobile-panel-target]")];
+els.mobileCloseButtons = [...document.querySelectorAll("[data-mobile-close]")];
+els.jobsSidebar = document.querySelector(".jobs-sidebar");
+els.toolsSidebar = document.querySelector(".tools-sidebar");
 const previewCtx = els.previewCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
 const cutoutCtx = els.cutoutCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -72,12 +88,19 @@ function initialize() {
   restorePresets();
   bindEvents();
   renderAll();
+  setMobilePanel(null);
 }
 
 function bindEvents() {
   els.imageInput.addEventListener("change", handleImageUpload);
   els.logoInput.addEventListener("change", handleLogoUpload);
   els.clearAll.addEventListener("click", clearTasks);
+  els.undoEdit.addEventListener("click", undoEditorChange);
+  els.redoEdit.addEventListener("click", redoEditorChange);
+  els.mobileNavButtons.forEach((button) => button.addEventListener("click", () => toggleMobilePanel(button.dataset.mobilePanelTarget)));
+  els.mobileCloseButtons.forEach((button) => button.addEventListener("click", closeMobilePanel));
+  els.mobileSheetBackdrop.addEventListener("click", closeMobilePanel);
+  els.mobileMultiSelect.addEventListener("click", toggleMobileMultiSelect);
   els.logoName.addEventListener("change", () => updateLogoMeta("name", els.logoName.value));
   els.logoGroup.addEventListener("change", () => updateLogoMeta("group", els.logoGroup.value));
   els.addLogoToJob.addEventListener("click", addSelectedLogosToJob);
@@ -90,8 +113,11 @@ function bindEvents() {
   els.autoPlace.addEventListener("click", autoPlaceSelectedOverlay);
   els.positionButtons.forEach((button) => button.addEventListener("click", () => placeSelectedOverlay(button.dataset.position)));
 
-  [els.logoSize, els.logoOpacity].forEach((input) => input.addEventListener("input", updateOverlayFromControls));
-  [els.brightness, els.contrast, els.saturation, els.smoothing, els.skinBrightening].forEach((input) => input.addEventListener("input", updateGroupAdjustments));
+  bindHistoryRangeInputs([els.logoSize, els.logoOpacity], updateOverlayFromControls);
+  bindHistoryRangeInputs(
+    [els.brightness, els.contrast, els.saturation, els.smoothing, els.skinBrightening],
+    updateGroupAdjustments,
+  );
   els.resetAdjustments.addEventListener("click", resetGroupAdjustments);
   els.selectCurrentGroup.addEventListener("click", () => selectGroupImages(true));
   els.clearCurrentGroup.addEventListener("click", () => selectGroupImages(false));
@@ -115,6 +141,7 @@ function bindEvents() {
   els.cutoutCanvas.addEventListener("pointerup", endCutoutAction);
   els.cutoutCanvas.addEventListener("pointercancel", endCutoutAction);
   document.addEventListener("keydown", handleModalKeydown);
+  document.addEventListener("keydown", handleEditorKeydown);
 
   els.previewCanvas.addEventListener("pointerdown", startOverlayDrag);
   els.previewCanvas.addEventListener("pointermove", moveOverlayDrag);
@@ -127,7 +154,207 @@ function bindEvents() {
   document.addEventListener("keydown", handlePreviewPanKeydown);
   document.addEventListener("keyup", handlePreviewPanKeyup);
   window.addEventListener("blur", releasePreviewPanModifier);
-  window.addEventListener("resize", fitPreviewCanvas);
+  window.addEventListener("resize", handleViewportResize);
+}
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 860px)").matches;
+}
+
+function toggleMobilePanel(panel) {
+  if (!isMobileLayout()) return;
+  setMobilePanel(state.mobilePanel === panel ? null : panel);
+}
+
+function setMobilePanel(panel) {
+  const mobile = isMobileLayout();
+  state.mobilePanel = mobile ? panel : null;
+  if (state.mobilePanel) document.body.dataset.mobilePanel = state.mobilePanel;
+  else delete document.body.dataset.mobilePanel;
+  document.body.classList.toggle("mobile-sheet-open", Boolean(state.mobilePanel));
+  els.mobileSheetBackdrop.hidden = !state.mobilePanel;
+  const titles = { logo: "Logo 库", group: "组合与修图", export: "批量导出" };
+  els.mobileSheetTitle.textContent = titles[state.mobilePanel] || "工具";
+  els.mobileNavButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.mobilePanelTarget === state.mobilePanel));
+  });
+  const jobsOpen = state.mobilePanel === "images";
+  const toolsOpen = ["logo", "group", "export"].includes(state.mobilePanel);
+  els.jobsSidebar.inert = mobile && !jobsOpen;
+  els.toolsSidebar.inert = mobile && !toolsOpen;
+  els.jobsSidebar.setAttribute("aria-hidden", String(mobile && !jobsOpen));
+  els.toolsSidebar.setAttribute("aria-hidden", String(mobile && !toolsOpen));
+  window.requestAnimationFrame(fitPreviewCanvas);
+}
+
+function closeMobilePanel() {
+  setMobilePanel(null);
+}
+
+function handleViewportResize() {
+  if (!isMobileLayout()) setMobilePanel(null);
+  else {
+    setMobilePanel(state.mobilePanel);
+    fitPreviewCanvas();
+  }
+}
+
+function toggleMobileMultiSelect() {
+  if (!isMobileLayout()) return;
+  state.mobileMultiSelect = !state.mobileMultiSelect;
+  updateMobileMultiSelectButton();
+  showNotice(state.mobileMultiSelect ? "多选已开启：依次点击画布中的 Logo。" : "多选已关闭。", true);
+}
+
+function updateMobileMultiSelectButton() {
+  const count = getSelectedOverlays().length;
+  els.mobileMultiSelect.setAttribute("aria-pressed", String(state.mobileMultiSelect));
+  els.mobileMultiSelect.textContent = state.mobileMultiSelect ? `结束多选（已选 ${count}）` : "多选 Logo";
+}
+
+function bindHistoryRangeInputs(inputs, update) {
+  inputs.forEach((input) => {
+    input.addEventListener("input", () => {
+      beginEditorTransaction();
+      update();
+    });
+    input.addEventListener("change", commitEditorTransaction);
+    input.addEventListener("blur", commitEditorTransaction);
+  });
+}
+
+function createEditorSnapshot() {
+  return {
+    groups: state.groups.map((group) => ({
+      id: group.id,
+      overlays: group.overlays.map((overlay) => ({ ...overlay })),
+      overlayGroups: (group.overlayGroups || []).map((overlayGroup) => ({ ...overlayGroup })),
+      adjustments: { ...group.adjustments },
+      presetId: group.presetId || null,
+      presetUpdatedAt: group.presetUpdatedAt || null,
+    })),
+    activeGroupId: state.activeGroupId,
+    activeImageId: state.activeImageId,
+    activePresetId: state.activePresetId,
+    selectedOverlayIds: [...state.selectedOverlayIds],
+    activeOverlayGroupId: state.activeOverlayGroupId,
+  };
+}
+
+function editorSnapshotsEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function pushEditorHistory(snapshot) {
+  state.editorHistory.undoStack.push(snapshot);
+  if (state.editorHistory.undoStack.length > EDITOR_HISTORY_LIMIT) state.editorHistory.undoStack.shift();
+  state.editorHistory.redoStack = [];
+  updateHistoryButtons();
+}
+
+function commitEditorMutation(snapshot) {
+  if (!snapshot || editorSnapshotsEqual(snapshot, createEditorSnapshot())) return false;
+  pushEditorHistory(snapshot);
+  return true;
+}
+
+function beginEditorTransaction() {
+  if (!state.editorHistory.transactionSnapshot) {
+    state.editorHistory.transactionSnapshot = createEditorSnapshot();
+  }
+}
+
+function commitEditorTransaction() {
+  const snapshot = state.editorHistory.transactionSnapshot;
+  state.editorHistory.transactionSnapshot = null;
+  return commitEditorMutation(snapshot);
+}
+
+function resetEditorHistory() {
+  state.editorHistory.undoStack = [];
+  state.editorHistory.redoStack = [];
+  state.editorHistory.transactionSnapshot = null;
+  updateHistoryButtons();
+}
+
+function restoreEditorSnapshot(snapshot) {
+  const savedGroups = new Map(snapshot.groups.map((group) => [group.id, group]));
+  state.groups.forEach((group) => {
+    const saved = savedGroups.get(group.id);
+    if (!saved) return;
+    group.overlays = saved.overlays.map((overlay) => ({ ...overlay }));
+    group.overlayGroups = saved.overlayGroups.map((overlayGroup) => ({ ...overlayGroup }));
+    group.adjustments = { ...saved.adjustments };
+    if (saved.presetId) group.presetId = saved.presetId;
+    else delete group.presetId;
+    if (saved.presetUpdatedAt) group.presetUpdatedAt = saved.presetUpdatedAt;
+    else delete group.presetUpdatedAt;
+  });
+  state.activeGroupId = state.groups.some((group) => group.id === snapshot.activeGroupId)
+    ? snapshot.activeGroupId
+    : state.groups[0]?.id || null;
+  const activeGroup = getActiveGroup();
+  state.activeImageId = activeGroup?.imageIds.includes(snapshot.activeImageId)
+    ? snapshot.activeImageId
+    : activeGroup?.imageIds[0] || null;
+  state.activePresetId = state.presets.some((preset) => preset.id === snapshot.activePresetId)
+    ? snapshot.activePresetId
+    : null;
+  setOverlaySelection(snapshot.selectedOverlayIds, snapshot.activeOverlayGroupId);
+  state.drag = null;
+  state.selectionBox = null;
+  persistPresets();
+  renderAll();
+}
+
+function undoEditorChange() {
+  commitEditorTransaction();
+  const snapshot = state.editorHistory.undoStack.pop();
+  if (!snapshot) return;
+  state.editorHistory.redoStack.push(createEditorSnapshot());
+  if (state.editorHistory.redoStack.length > EDITOR_HISTORY_LIMIT) state.editorHistory.redoStack.shift();
+  restoreEditorSnapshot(snapshot);
+  showNotice("已撤销上一步编辑。", true);
+}
+
+function redoEditorChange() {
+  commitEditorTransaction();
+  const snapshot = state.editorHistory.redoStack.pop();
+  if (!snapshot) return;
+  state.editorHistory.undoStack.push(createEditorSnapshot());
+  if (state.editorHistory.undoStack.length > EDITOR_HISTORY_LIMIT) state.editorHistory.undoStack.shift();
+  restoreEditorSnapshot(snapshot);
+  showNotice("已重做下一步编辑。", true);
+}
+
+function updateHistoryButtons() {
+  els.undoEdit.disabled = state.editorHistory.undoStack.length === 0;
+  els.redoEdit.disabled = state.editorHistory.redoStack.length === 0;
+}
+
+function handleEditorKeydown(event) {
+  if (!els.cutoutModal.hidden) return;
+  const modifierDown = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+  if (modifierDown && key === "z") {
+    if (isTypingTarget(event.target)) return;
+    event.preventDefault();
+    if (event.shiftKey) redoEditorChange();
+    else undoEditorChange();
+    return;
+  }
+  if (modifierDown && key === "y") {
+    if (isTypingTarget(event.target)) return;
+    event.preventDefault();
+    redoEditorChange();
+    return;
+  }
+  if (!isTextEntryTarget(event.target)
+      && (event.key === "Delete" || event.key === "Backspace")
+      && getSelectedOverlays().length) {
+    event.preventDefault();
+    removeSelectedOverlay();
+  }
 }
 
 async function handleImageUpload(event) {
@@ -142,7 +369,9 @@ async function handleImageUpload(event) {
     state.selectedImageIds.add(image.id);
   });
   if (!state.activeGroupId && state.groups[0]) activateGroup(state.groups[0].id);
+  resetEditorHistory();
   renderAll();
+  if (isMobileLayout()) closeMobilePanel();
   showNotice(failed ? `已添加 ${loaded.length} 张，${failed} 张读取失败。` : `已自动分成 ${state.groups.length} 个比例任务。`, failed === 0);
   event.target.value = "";
 }
@@ -469,7 +698,9 @@ function activateGroup(groupId) {
   const group = getActiveGroup();
   const preset = getActivePreset();
   if (group && preset && (group.presetId !== preset.id || group.presetUpdatedAt !== preset.updatedAt)) {
+    const snapshot = createEditorSnapshot();
     applyPresetToGroup(preset.id, group);
+    commitEditorMutation(snapshot);
   }
   state.activeImageId = group?.imageIds[0] || null;
   setOverlaySelection(group?.overlays[0] ? [group.overlays[0].id] : []);
@@ -530,6 +761,7 @@ function clearTasks() {
   state.selectedOverlayIds.clear();
   state.activeOverlayGroupId = null;
   state.selectionBox = null;
+  resetEditorHistory();
   hideNotice();
   renderAll();
 }
@@ -547,6 +779,7 @@ function addSelectedLogosToJob() {
     width: 0.18,
     opacity: 1,
   }));
+  const snapshot = added.length ? createEditorSnapshot() : null;
   group.overlays.push(...added);
   added.forEach(clampOverlay);
   setOverlaySelection(added.length ? added.map((overlay) => overlay.id) : [group.overlays.at(-1)?.id].filter(Boolean));
@@ -556,12 +789,17 @@ function addSelectedLogosToJob() {
   renderPreview();
   renderGroupList();
   updateButtons();
+  commitEditorMutation(snapshot);
+  if (added.length && isMobileLayout()) closeMobilePanel();
 }
 
 function removeSelectedOverlay() {
   const group = getActiveGroup();
-  if (!group || state.activeOverlayGroupId) return;
-  group.overlays = group.overlays.filter((overlay) => overlay.id !== state.selectedOverlayId);
+  const selected = getSelectedOverlays();
+  if (!group || !selected.length) return;
+  const snapshot = createEditorSnapshot();
+  const selectedIds = new Set(selected.map((overlay) => overlay.id));
+  group.overlays = group.overlays.filter((overlay) => !selectedIds.has(overlay.id));
   pruneOverlayGroups(group);
   setOverlaySelection(group.overlays[0] ? [group.overlays[0].id] : []);
   renderOverlayList();
@@ -570,6 +808,8 @@ function removeSelectedOverlay() {
   renderPreview();
   renderGroupList();
   updateButtons();
+  commitEditorMutation(snapshot);
+  showNotice(`已删除 ${selected.length} 个 Logo，可使用撤销恢复。`, true);
 }
 
 function deleteSelectedLogos() {
@@ -590,6 +830,7 @@ function deleteSelectedLogos() {
   setOverlaySelection(activeGroup?.overlays[0] ? [activeGroup.overlays[0].id] : []);
   persistLogoLibrary();
   persistPresets();
+  resetEditorHistory();
   renderAll();
 }
 
@@ -640,6 +881,7 @@ function updateCurrentPreset() {
 }
 
 function activatePreset(presetId) {
+  const snapshot = getActiveGroup() ? createEditorSnapshot() : null;
   state.activePresetId = presetId;
   const preset = getActivePreset();
   if (preset) els.presetName.value = preset.name;
@@ -647,6 +889,7 @@ function activatePreset(presetId) {
   if (group) applyPresetToGroup(presetId, group);
   persistPresets();
   renderAll();
+  commitEditorMutation(snapshot);
 }
 
 function applyPresetToGroup(presetId, group) {
@@ -698,6 +941,7 @@ function createOverlayGroup() {
   const group = getActiveGroup();
   const selected = getSelectedOverlays();
   if (!group || selected.length < 2 || selected.some((overlay) => overlay.groupId)) return;
+  const snapshot = createEditorSnapshot();
   group.overlayGroups ||= [];
   const overlayGroup = {
     id: uid(),
@@ -711,6 +955,9 @@ function createOverlayGroup() {
   syncOverlayControls();
   renderPreview();
   updateButtons();
+  commitEditorMutation(snapshot);
+  state.mobileMultiSelect = false;
+  updateMobileMultiSelectButton();
   showNotice(`${overlayGroup.name}已锁定，解散后才能单独编辑成员。`, true);
 }
 
@@ -718,6 +965,7 @@ function ungroupActiveOverlayGroup() {
   const group = getActiveGroup();
   const overlayGroup = getActiveOverlayGroup();
   if (!group || !overlayGroup) return;
+  const snapshot = createEditorSnapshot();
   const memberIds = group.overlays.filter((overlay) => overlay.groupId === overlayGroup.id).map((overlay) => overlay.id);
   group.overlays.forEach((overlay) => {
     if (overlay.groupId === overlayGroup.id) overlay.groupId = null;
@@ -729,6 +977,7 @@ function ungroupActiveOverlayGroup() {
   syncOverlayControls();
   renderPreview();
   updateButtons();
+  commitEditorMutation(snapshot);
   showNotice(`${overlayGroup.name}已解散，Logo 保留在原位置。`, true);
 }
 
@@ -781,9 +1030,11 @@ function updateGroupAdjustments() {
 function resetGroupAdjustments() {
   const group = getActiveGroup();
   if (!group) return;
+  const snapshot = createEditorSnapshot();
   group.adjustments = { brightness: 0, contrast: 0, saturation: 0, smoothing: 0, skinBrightening: 0 };
   syncControlsFromGroup();
   renderPreview();
+  commitEditorMutation(snapshot);
 }
 
 function placeSelectedOverlay(position) {
@@ -791,6 +1042,7 @@ function placeSelectedOverlay(position) {
   const group = getActiveGroup();
   const logo = getLogoById(overlay?.logoId);
   if (!overlay || !group || !logo) return;
+  const snapshot = createEditorSnapshot();
   const margin = 0.035;
   const height = overlayHeightNormalized(overlay, logo, group.ratio);
   const positions = {
@@ -803,6 +1055,7 @@ function placeSelectedOverlay(position) {
   [overlay.x, overlay.y] = positions[position] || positions["bottom-right"];
   clampOverlay(overlay);
   renderPreview();
+  commitEditorMutation(snapshot);
 }
 
 function autoPlaceSelectedOverlay() {
@@ -811,6 +1064,7 @@ function autoPlaceSelectedOverlay() {
   const group = getActiveGroup();
   const logo = getLogoById(overlay?.logoId);
   if (!overlay || !image || !group || !logo) return;
+  const snapshot = createEditorSnapshot();
   drawBaseImage(image, group, els.previewCanvas, previewCtx);
   const height = overlayHeightNormalized(overlay, logo, group.ratio);
   const margin = 0.035;
@@ -827,28 +1081,42 @@ function autoPlaceSelectedOverlay() {
   });
   [overlay.x, overlay.y] = best.point;
   renderPreview();
+  commitEditorMutation(snapshot);
 }
 
 function startOverlayDrag(event) {
   const group = getActiveGroup();
   if (!group) return;
+  if (event.pointerType === "touch") {
+    state.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (state.touchPointers.size >= 2) {
+      startPreviewPinch(event);
+      return;
+    }
+  }
   if (event.button === 1 || state.previewSpaceDown) {
     startPreviewPan(event);
     return;
   }
   if (event.button !== 0) return;
   const point = pointerToCanvas(event);
+  const hit = [...group.overlays].reverse().find((overlay) => pointInOverlay(point, overlay));
+  if (event.pointerType === "touch" && state.mobileMultiSelect) {
+    selectOverlayForMobileMulti(hit);
+    event.preventDefault();
+    return;
+  }
   const resizeTarget = getResizeTarget(point);
   if (resizeTarget) {
     startOverlayResize(event, resizeTarget);
     return;
   }
-  const hit = [...group.overlays].reverse().find((overlay) => pointInOverlay(point, overlay));
   if (hit) {
     const members = hit.groupId
       ? group.overlays.filter((overlay) => overlay.groupId === hit.groupId)
       : [hit];
     setOverlaySelection(members.map((overlay) => overlay.id), hit.groupId || null);
+    beginEditorTransaction();
     state.drag = {
       type: "move",
       pointerId: event.pointerId,
@@ -856,6 +1124,9 @@ function startOverlayDrag(event) {
       startY: point.y,
       positions: members.map((overlay) => ({ id: overlay.id, x: overlay.x, y: overlay.y })),
     };
+  } else if (event.pointerType === "touch") {
+    setOverlaySelection([]);
+    state.drag = { type: "touch-empty", pointerId: event.pointerId };
   } else {
     setOverlaySelection([]);
     state.selectionBox = { startX: point.x, startY: point.y, x: point.x, y: point.y };
@@ -870,8 +1141,15 @@ function startOverlayDrag(event) {
 }
 
 function moveOverlayDrag(event) {
+  if (event.pointerType === "touch" && state.touchPointers.has(event.pointerId)) {
+    state.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  }
+  if (state.pinch) {
+    updatePreviewPinch(event);
+    return;
+  }
   if (!state.drag) {
-    updateResizeCursor(event);
+    if (event.pointerType !== "touch") updateResizeCursor(event);
     return;
   }
   if (state.drag.pointerId !== event.pointerId) return;
@@ -879,6 +1157,7 @@ function moveOverlayDrag(event) {
     movePreviewPan(event);
     return;
   }
+  if (state.drag.type === "touch-empty") return;
   const point = pointerToCanvas(event);
   if (state.drag.type === "resize") {
     resizeSelectedOverlays(point);
@@ -908,11 +1187,20 @@ function moveOverlayDrag(event) {
 }
 
 function endOverlayDrag(event) {
+  if (event.pointerType === "touch") {
+    state.touchPointers.delete(event.pointerId);
+    if (state.pinch) {
+      if (els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.releasePointerCapture(event.pointerId);
+      if (state.touchPointers.size < 2) endPreviewPinch();
+      return;
+    }
+  }
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   if (state.drag.type === "pan") {
     endPreviewPan(event);
     return;
   }
+  const edited = state.drag.type === "move" || state.drag.type === "resize";
   if (state.drag.type === "select" && state.selectionBox) {
     const width = Math.abs(state.selectionBox.x - state.selectionBox.startX);
     const height = Math.abs(state.selectionBox.y - state.selectionBox.startY);
@@ -928,6 +1216,75 @@ function endOverlayDrag(event) {
   syncOverlayControls();
   renderPreview();
   updateButtons();
+  if (edited) commitEditorTransaction();
+}
+
+function selectOverlayForMobileMulti(hit) {
+  const group = getActiveGroup();
+  if (!group) return;
+  if (!hit) {
+    setOverlaySelection([]);
+  } else {
+    const memberIds = hit.groupId
+      ? group.overlays.filter((overlay) => overlay.groupId === hit.groupId).map((overlay) => overlay.id)
+      : [hit.id];
+    const nextIds = new Set(state.selectedOverlayIds);
+    const allSelected = memberIds.every((id) => nextIds.has(id));
+    memberIds.forEach((id) => allSelected ? nextIds.delete(id) : nextIds.add(id));
+    const selectsOnlyThisGroup = Boolean(hit.groupId)
+      && nextIds.size === memberIds.length
+      && memberIds.every((id) => nextIds.has(id));
+    setOverlaySelection([...nextIds], selectsOnlyThisGroup ? hit.groupId : null);
+  }
+  renderOverlayList();
+  renderOverlayGroupList();
+  syncOverlayControls();
+  renderPreview();
+  updateButtons();
+}
+
+function startPreviewPinch(event) {
+  if (state.drag?.type === "move" || state.drag?.type === "resize") commitEditorTransaction();
+  state.drag = null;
+  state.selectionBox = null;
+  els.previewCanvas.classList.remove("dragging");
+  clearResizeCursor();
+  const points = [...state.touchPointers.values()].slice(0, 2);
+  const center = midpoint(points[0], points[1]);
+  state.pinch = {
+    distance: pointDistance(points[0], points[1]),
+    zoom: state.previewZoom,
+    center,
+  };
+  if (!els.previewCanvas.hasPointerCapture(event.pointerId)) els.previewCanvas.setPointerCapture(event.pointerId);
+  els.previewStage.classList.add("panning");
+  event.preventDefault();
+}
+
+function updatePreviewPinch(event) {
+  const points = [...state.touchPointers.values()].slice(0, 2);
+  if (points.length < 2 || !state.pinch) return;
+  const center = midpoint(points[0], points[1]);
+  const distance = pointDistance(points[0], points[1]);
+  const nextZoom = state.pinch.distance ? state.pinch.zoom * distance / state.pinch.distance : state.previewZoom;
+  setPreviewZoom(nextZoom, { clientX: center.x, clientY: center.y });
+  els.previewViewport.scrollLeft -= center.x - state.pinch.center.x;
+  els.previewViewport.scrollTop -= center.y - state.pinch.center.y;
+  state.pinch.center = center;
+  event.preventDefault();
+}
+
+function endPreviewPinch() {
+  state.pinch = null;
+  els.previewStage.classList.remove("panning");
+}
+
+function midpoint(first, second) {
+  return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+}
+
+function pointDistance(first, second) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
 }
 
 function moveSelectedOverlays(point) {
@@ -950,6 +1307,7 @@ function moveSelectedOverlays(point) {
 function startOverlayResize(event, target) {
   const bounds = target.bounds;
   const anchor = oppositeResizeAnchor(bounds, target.corner);
+  beginEditorTransaction();
   state.drag = {
     type: "resize",
     pointerId: event.pointerId,
@@ -1102,6 +1460,13 @@ function releasePreviewPanModifier() {
 
 function isTextEntryTarget(target) {
   return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+}
+
+function isTypingTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target.tagName === "TEXTAREA") return true;
+  if (target.tagName !== "INPUT") return false;
+  return !["button", "checkbox", "color", "file", "radio", "range", "reset", "submit"].includes(target.type);
 }
 
 function normalizedRect(startX, startY, endX, endY) {
@@ -1755,7 +2120,9 @@ function drawSelection(ctx, rect) {
 }
 
 function selectionHandleSize(canvasWidth) {
-  return Math.max(20, canvasWidth / 45);
+  const displayWidth = els.previewCanvas.getBoundingClientRect().width;
+  const mobileTouchSize = isMobileLayout() && displayWidth ? 34 * canvasWidth / displayWidth : 0;
+  return Math.max(20, canvasWidth / 45, mobileTouchSize);
 }
 
 async function downloadCurrentImage() {
@@ -1848,6 +2215,8 @@ function updateButtons() {
   els.selectAllImages.disabled = state.images.length === 0 || state.exporting;
   els.clearImageSelection.disabled = state.selectedImageIds.size === 0 || state.exporting;
   els.selectedImageCount.textContent = `已选 ${state.selectedImageIds.size} / ${state.images.length} 张`;
+  updateHistoryButtons();
+  updateMobileMultiSelectButton();
 }
 
 function updateGlobalStatus() {

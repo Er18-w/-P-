@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="按图片比例分组，批量添加 Logo、调色并高清压缩导出。" />
     <title>批量P图工作台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260824-2" />
+    <link rel="stylesheet" href="./styles.css?v=20260824-4" />
   </head>
   <body>
     <header class="app-header">
@@ -24,6 +24,10 @@
 
     <main class="app-shell">
       <aside class="jobs-sidebar">
+        <div class="mobile-sheet-bar">
+          <strong>图片与任务</strong>
+          <button class="mobile-sheet-close quiet-button" type="button" data-mobile-close>完成</button>
+        </div>
         <div class="sidebar-heading">
           <div>
             <span class="eyebrow">批处理任务</span>
@@ -50,9 +54,15 @@
             <span class="eyebrow">当前任务</span>
             <h2 id="activeGroupTitle">尚未选择比例任务</h2>
           </div>
-          <div class="preview-meta">
-            <strong id="activeImageName">暂无图片</strong>
-            <span id="activeImageMeta">添加图片后可预览</span>
+          <div class="workspace-toolbar-actions">
+            <div class="history-controls" role="group" aria-label="编辑历史">
+              <button id="undoEdit" class="quiet-button" type="button" title="撤销（Ctrl+Z）" disabled>↶ 撤销</button>
+              <button id="redoEdit" class="quiet-button" type="button" title="重做（Ctrl+Y）" disabled>↷ 重做</button>
+            </div>
+            <div class="preview-meta">
+              <strong id="activeImageName">暂无图片</strong>
+              <span id="activeImageMeta">添加图片后可预览</span>
+            </div>
           </div>
         </div>
 
@@ -90,7 +100,11 @@
       </section>
 
       <aside class="tools-sidebar">
-        <section class="tool-section">
+        <div class="mobile-sheet-bar">
+          <strong id="mobileSheetTitle">工具</strong>
+          <button class="mobile-sheet-close quiet-button" type="button" data-mobile-close>完成</button>
+        </div>
+        <section class="tool-section" data-mobile-panel="logo">
           <div class="section-heading">
             <div>
               <span class="step-number">1</span>
@@ -112,7 +126,7 @@
           </div>
         </section>
 
-        <section class="tool-section">
+        <section class="tool-section" data-mobile-panel="group">
           <div class="section-heading">
             <div>
               <span class="step-number">2</span>
@@ -133,6 +147,7 @@
               <p class="tool-empty">尚未创建组合。</p>
             </div>
             <div class="group-actions">
+              <button id="mobileMultiSelect" class="quiet-button mobile-only" type="button" aria-pressed="false">多选 Logo</button>
               <button id="createOverlayGroup" class="secondary-button" disabled>创建组合</button>
               <button id="ungroupOverlay" class="quiet-button" disabled>解散组合</button>
             </div>
@@ -166,7 +181,7 @@
           </div>
         </section>
 
-        <section class="tool-section">
+        <section class="tool-section" data-mobile-panel="group">
           <div class="section-heading">
             <div>
               <span class="step-number">3</span>
@@ -185,7 +200,7 @@
           <label class="range-field"><span>肤色提亮 <output id="skinBrighteningValue">0%</output></span><input id="skinBrightening" type="range" min="0" max="60" value="0" /></label>
         </section>
 
-        <section class="tool-section export-section">
+        <section class="tool-section export-section" data-mobile-panel="export">
           <div class="section-heading">
             <div>
               <span class="step-number">4</span>
@@ -211,6 +226,14 @@
         </section>
       </aside>
     </main>
+
+    <button id="mobileSheetBackdrop" class="mobile-sheet-backdrop" type="button" aria-label="关闭工具面板" hidden></button>
+    <nav id="mobileNav" class="mobile-nav" aria-label="手机端编辑工具">
+      <button type="button" data-mobile-panel-target="images" aria-pressed="false"><span>▣</span>图片</button>
+      <button type="button" data-mobile-panel-target="logo" aria-pressed="false"><span>◇</span>Logo</button>
+      <button type="button" data-mobile-panel-target="group" aria-pressed="false"><span>⧉</span>组合</button>
+      <button type="button" data-mobile-panel-target="export" aria-pressed="false"><span>↓</span>导出</button>
+    </nav>
 
     <div id="cutoutModal" class="modal-backdrop" hidden>
       <section class="cutout-dialog" role="dialog" aria-modal="true" aria-labelledby="cutoutTitle">
@@ -268,6 +291,6 @@
     <script src="./third-party/tracking-face.min.js?v=20260820-3"></script>
     <script src="./third-party/stackblur.min.js?v=20260820-3"></script>
     <script src="./third-party/magic-wand.js?v=20260820-3"></script>
-    <script src="./app.js?v=20260824-2"></script>
+    <script src="./app.js?v=20260824-4"></script>
   </body>
 </html>
