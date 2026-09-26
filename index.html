@@ -38,10 +38,11 @@
 
         <label class="upload-zone" for="imageInput">
           <span class="upload-icon">+</span>
-          <strong>添加一批图片</strong>
-          <small>系统会按实际比例自动拆成任务</small>
+          <strong id="imageUploadTitle">批量选择照片</strong>
+          <small>可一次多选；若浏览器只允许单选，可重复添加</small>
         </label>
-        <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+        <input id="imageInput" type="file" accept="image/*" multiple />
+        <p id="mobileUploadStatus" class="mobile-upload-status" aria-live="polite">尚未添加照片</p>
 
         <div id="groupList" class="group-list" aria-label="比例任务列表">
           <div class="sidebar-empty">添加图片后，这里会出现“任务 1、任务 2…”</div>
@@ -294,3 +295,4 @@
     <script src="./app.js?v=20260824-4"></script>
   </body>
 </html>
+
