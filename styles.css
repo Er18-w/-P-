@@ -70,6 +70,7 @@ h2 { font-size: 15px; line-height: 1.25; }
 .upload-zone strong { color: var(--accent-strong); font-size: 14px; }
 .upload-zone small { color: var(--muted); font-size: 11px; }
 .upload-icon { display: grid; width: 30px; height: 30px; margin-bottom: 3px; border-radius: 50%; place-items: center; background: var(--accent); color: white; font-size: 20px; line-height: 1; }
+.mobile-upload-status { margin: 8px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
 
 .group-list { display: grid; gap: 8px; margin-top: 14px; }
 .group-card { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); text-align: left; }
@@ -301,6 +302,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   .tools-sidebar > .mobile-sheet-bar { padding: 8px 14px; }
   .mobile-sheet-close { min-height: 38px; padding: 0 14px; }
   .sidebar-heading { margin-top: 12px; }
+  .upload-zone { min-height: 104px; }
+  .mobile-upload-status { margin-bottom: 4px; }
   .group-list { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .tool-section { padding: 14px; }
   .tool-section button, .tool-section label[for], .jobs-sidebar button { min-height: 44px; }
@@ -416,3 +419,4 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .jobs-sidebar, .tools-sidebar, .workspace { transition: none; }
 }
+

@@ -50,7 +50,7 @@ const state = {
 };
 
 const elementIds = [
-  "imageInput", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
+  "imageInput", "imageUploadTitle", "mobileUploadStatus", "logoInput", "clearAll", "globalStatus", "imageCount", "groupList",
   "activeGroupTitle", "activeImageName", "activeImageMeta", "groupImageCount", "thumbs",
   "undoEdit", "redoEdit",
   "mobileSheetBackdrop", "mobileNav", "mobileSheetTitle", "mobileMultiSelect",
@@ -358,8 +358,17 @@ function handleEditorKeydown(event) {
 }
 
 async function handleImageUpload(event) {
-  const files = [...event.target.files].filter(isImageFile);
-  if (!files.length) return;
+  const selectedFiles = [...event.target.files].filter(isImageFile);
+  event.target.value = "";
+  if (!selectedFiles.length) return;
+  const existingFiles = new Set(state.images.map((image) => fileIdentity(image.file)));
+  const files = selectedFiles.filter((file) => !existingFiles.has(fileIdentity(file)));
+  const duplicateCount = selectedFiles.length - files.length;
+  if (!files.length) {
+    showNotice("这些照片已经添加过了，可继续选择其他照片。", false);
+    updateMobileUploadState();
+    return;
+  }
   showNotice(`正在读取 ${files.length} 张图片…`, true);
   const results = await Promise.allSettled(files.map(loadImageFile));
   const loaded = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
@@ -371,9 +380,12 @@ async function handleImageUpload(event) {
   if (!state.activeGroupId && state.groups[0]) activateGroup(state.groups[0].id);
   resetEditorHistory();
   renderAll();
-  if (isMobileLayout()) closeMobilePanel();
-  showNotice(failed ? `已添加 ${loaded.length} 张，${failed} 张读取失败。` : `已自动分成 ${state.groups.length} 个比例任务。`, failed === 0);
-  event.target.value = "";
+  const details = [
+    `已添加 ${loaded.length} 张`,
+    duplicateCount ? `跳过 ${duplicateCount} 张重复照片` : "",
+    failed ? `${failed} 张读取失败` : "",
+  ].filter(Boolean).join("，");
+  showNotice(`${details}。${isMobileLayout() ? "可以继续添加照片。" : ""}`, failed === 0);
 }
 
 async function handleLogoUpload(event) {
@@ -2222,6 +2234,13 @@ function updateButtons() {
 function updateGlobalStatus() {
   els.imageCount.textContent = `${state.images.length} 张`;
   els.globalStatus.textContent = state.images.length ? `${state.groups.length} 个比例任务 · 已选 ${state.selectedImageIds.size}/${state.images.length} 张` : "等待添加图片";
+  updateMobileUploadState();
+}
+
+function updateMobileUploadState() {
+  const count = state.images.length;
+  els.imageUploadTitle.textContent = count ? "继续添加照片" : "批量选择照片";
+  els.mobileUploadStatus.textContent = count ? `已添加 ${count} 张，可继续从相册追加` : "尚未添加照片";
 }
 
 function restoreLogoLibrary() {
@@ -2509,7 +2528,10 @@ function showNotice(message, success) {
 }
 
 function hideNotice() { els.notice.hidden = true; }
-function isImageFile(file) { return file.type.startsWith("image/"); }
+function isImageFile(file) {
+  return file.type.startsWith("image/") || /\.(?:avif|heic|heif|jpe?g|png|webp)$/i.test(file.name);
+}
+function fileIdentity(file) { return `${file.name}:${file.size}:${file.lastModified}`; }
 function uid() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 function stripExtension(name) { return name.replace(/\.[^.]+$/, ""); }
 function signedValue(value) { const number = Number(value); return number > 0 ? `+${number}` : String(number); }
@@ -2519,3 +2541,4 @@ function safeFilePart(value) { return value.replace(/[\\/:*?"<>|]/g, "-"); }
 function formatBytes(bytes) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function yieldToBrowser() { return new Promise((resolve) => requestAnimationFrame(() => resolve())); }
 function escapeHtml(value) { const node = document.createElement("div"); node.textContent = value; return node.innerHTML; }
+
